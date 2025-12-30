@@ -52,7 +52,7 @@ CH_WALL_DMG1    = 11
 CH_WALL_DMG2    = 12
 CH_WALL_DMG3    = 13
 
-MISSILE_SLOW_MASK = %00000111    ; update once every 8 frames (7 = slower, 3 = medium)
+MISSILE_SLOW_MASK = 2    ; update once every 8 frames (7 = slower, 3 = medium)
 
 SHOT_START_X     = 24
 SHOT_SPEED       = 4          ; pixels per update (try 2 or 4)
@@ -87,9 +87,18 @@ SPR3_PTR_SHOT   = $c6   ; $3180
 ; --- Lose/Explosion constants ---
 EXPLODE_MID_ROW      = 12
 EXPLODE_MAX_RADIUS   = 12          ; covers rows 0..24 from mid
-EXPLODE_WAIT_FRAMES  = 120         ; ~2 seconds @ 60Hz
+EXPLODE_WAIT_FRAMES  = 45         ; ~2 seconds @ 60Hz
 COLLIDE_X_THRESH     = 24          ; pixels
 COLLIDE_Y_THRESH     = 21          ; pixels
+
+MISS_HIT_X_OFF      = 12     ; center of sprite box
+MISS_HIT_Y_OFF      = 10
+PLAYER_HIT_X_OFF    = 12
+PLAYER_HIT_Y_OFF    = 10
+
+COLLIDE_MISS_X_THR  = 8     ; tune these (smaller = stricter)
+COLLIDE_MISS_Y_THR  = 8
+
 
 ; ----------------------------
 ; Game variables (zero page)
@@ -1099,80 +1108,105 @@ cpec_done:
         rts
 
 ; ------------------------------------------------------------
-; Collision: sprite0 (player) vs sprite2 (enemy missile)
-; Simple bbox: |dx|<24 and |dy|<21  (same thresholds)
-; Uses miss_x/miss_x_hi/miss_y
+; Collision: player vs enemy missile using CENTER hit points
 ; ------------------------------------------------------------
 check_player_missile_collision:
-        ; if already exploding, skip
         lda game_mode
-        bne cpmc_done
+        
+        beq cpmc_continue     ; opposite condition (short hop)
+        jmp cpmc_done         ; long jump (any distance)
+cpmc_continue:
 
-        ; ---- dx = abs(player_x - miss_x) on 9-bit ----
+
+; ---- player_cx = yar_x + PLAYER_HIT_X_OFF (9-bit)
+        lda yar_x
+        clc
+        adc #PLAYER_HIT_X_OFF
+        sta tmp1_lo
         lda yar_x_hi
-        cmp miss_x_hi
+        adc #0
+        sta tmp1_hi
+
+; ---- miss_cx = miss_x + MISS_HIT_X_OFF (9-bit)
+        lda miss_x
+        clc
+        adc #MISS_HIT_X_OFF
+        sta tmp2_lo
+        lda miss_x_hi
+        adc #0
+        sta tmp2_hi
+
+; ---- dx = abs(player_cx - miss_cx)
+        lda tmp1_hi
+        cmp tmp2_hi
         bne mdx_hi_diff
 
-        lda yar_x
-        cmp miss_x
-        beq mdx_zero
+        lda tmp1_lo
+        cmp tmp2_lo
+        beq mdx_ok
         bcc mdx_player_lt
 
 ; player > missile
 mdx_player_gt:
-        lda yar_x
+        lda tmp1_lo
         sec
-        sbc miss_x
-        sta dx_lo
-        lda #0
-        sbc #0
-        sta dx_hi
-        jmp mdx_check
+        sbc tmp2_lo
+        cmp #COLLIDE_MISS_X_THR
+        bcs cpmc_done
+        jmp mdy_calc
 
 mdx_player_lt:
-        lda miss_x
+        lda tmp2_lo
         sec
-        sbc yar_x
-        sta dx_lo
-        lda #0
-        sbc #0
-        sta dx_hi
-        jmp mdx_check
+        sbc tmp1_lo
+        cmp #COLLIDE_MISS_X_THR
+        bcs cpmc_done
+        jmp mdy_calc
 
 mdx_hi_diff:
-        ; hi differs -> treat as far apart
-        lda #1
-        sta dx_hi
+        ; centers are in different 256-page => far apart
+        jmp cpmc_done
 
-mdx_zero:
-mdx_check:
-        lda dx_hi
-        bne cpmc_done
-        lda dx_lo
-        cmp #COLLIDE_X_THRESH
-        bcs cpmc_done
+mdx_ok:
+        ; dx == 0, continue to Y
+        ; fall through
 
-        ; ---- dy = abs(player_y - miss_y) ----
+; ---- dy using center hit points (8-bit is fine)
+mdy_calc:
         lda yar_y
-        cmp miss_y
-        beq mdy_ok
-        bcc mdy_player_lt
-        sec
-        sbc miss_y
-        jmp mdy_cmp
-mdy_player_lt:
+        clc
+        adc #PLAYER_HIT_Y_OFF
+        sta tmp1_lo
+
         lda miss_y
+        clc
+        adc #MISS_HIT_Y_OFF
+        sta tmp2_lo
+
+        lda tmp1_lo
+        cmp tmp2_lo
+        beq hit
+        bcc mdy_player_lt
+
         sec
-        sbc yar_y
-mdy_cmp:
-        cmp #COLLIDE_Y_THRESH
+        sbc tmp2_lo
+        cmp #COLLIDE_MISS_Y_THR
         bcs cpmc_done
-mdy_ok:
-        ; COLLISION!
+        jmp hit
+
+mdy_player_lt:
+        lda tmp2_lo
+        sec
+        sbc tmp1_lo
+        cmp #COLLIDE_MISS_Y_THR
+        bcs cpmc_done
+
+hit:
         jsr player_lose
 
 cpmc_done:
         rts
+
 
 
 ; ------------------------------------------------------------
@@ -1361,6 +1395,12 @@ enemy_y_val:         .byte 0
 
 dx_lo:           .byte 0
 dx_hi:           .byte 0
+
+tmp1_lo: .byte 0
+tmp1_hi: .byte 0
+tmp2_lo: .byte 0
+tmp2_hi: .byte 0
+
 
 ; ------------------------------------------------------------
 ; Assets
