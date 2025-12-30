@@ -60,13 +60,13 @@ SHOT_OFFSCREEN_X = 252
 SHOT_OFFSCREEN_LO = $68    ; 360 = $0168
 SHOT_OFFSCREEN_HI = 1
 
-BARRIER_ROW   = 7          ; top row of the barrier (tweak if needed)
-BARRIER_COL   = 27         ; left edge of the barrier (tweak if needed)
+BARRIER_ROW   = 5          ; top row of the barrier (tweak if needed)
+BARRIER_COL   = 29         ; left edge of the barrier (tweak if needed)
 BARRIER_COLOR = 2          ; red
 
-BARRIER_H      = 13
-BARRIER_W      = 13              ; overall width in chars
-BARRIER_THICK  = 2               ; thickness of border
+BARRIER_H      = 12
+BARRIER_W      = 10              ; overall width in chars
+BARRIER_THICK  = 3               ; thickness of border
 
 PLAYER_MIN_X_LO = $18   ; 24
 PLAYER_MIN_X_HI = 0
@@ -75,6 +75,14 @@ PLAYER_MAX_X_HI = 1
 
 ZONE_BLANK_MASK = 2   ; 0=toggle every frame, 1=every 2 frames, 3=every 4, 7=every 8...
 
+; sprite pointer values (bank 0, sprite data at $3000)
+SPR0_PTR_RIGHT  = $c0   ; $3000
+SPR0_PTR_UP     = $c1   ; $3040
+SPR0_PTR_DOWN   = $c2   ; $3080
+SPR0_PTR_LEFT   = $c3   ; $30c0
+SPR1_PTR_ALIEN  = $c4   ; $3100
+SPR2_PTR_MISS   = $c5   ; $3140
+SPR3_PTR_SHOT   = $c6   ; $3180
 
 ; ----------------------------
 ; Game variables (zero page)
@@ -90,6 +98,7 @@ shot_y   = $f8
 shot_state  = $f9     ; 0=ready, 1=flying
 fire_prev   = $fa     ; previous fire bit (0 pressed, 1 released)
 
+joy_state   = $ef     ; temp joystick cache (picked a free ZP byte here)
 
 ; pointers must be ZP for (zp),y
 src_lo      = $fb
@@ -121,7 +130,6 @@ start:
         sta yar_x_hi
         sta miss_x_hi
         sta shot_x_hi
-
 
         lda #220
         sta miss_x
@@ -164,15 +172,9 @@ start:
         lda #11
         sta $d023          ; zone shared color 2
 
-
         ; copy assets
         jsr copy_charset
         jsr copy_sprites
-
-        lda #24        ; near left side
-        sta shot_x
-        lda yar_y
-        sta shot_y
 
         lda #SHOT_START_X
         sta shot_x
@@ -185,12 +187,10 @@ start:
         lda #$10          ; fire bit released (bit4=1) initial
         sta fire_prev
 
-
-
         jsr clear_screen
         jsr draw_zone_and_wall
         jsr draw_barrier
-        jsr init_sprites 
+        jsr init_sprites
         jsr init_irq
 
         cli
@@ -228,7 +228,8 @@ cc_loop:
         rts
 
 ; ------------------------------------------------------------
-; Copy sprite data (256 bytes = 4 sprites) to $3000
+; Copy sprite data to $3000
+; NOW copies 2 pages (512 bytes) so we can store 4 frames + sprites.
 ; ------------------------------------------------------------
 copy_sprites:
         lda #<sprite_data
@@ -241,13 +242,20 @@ copy_sprites:
         lda #>SPR_DST
         sta dst_hi
 
-        ; 1 page
+        lda #2
+        sta pages_left
+
+cs_pages:
         ldy #0
 cs_loop:
         lda (src_lo),y
         sta (dst_lo),y
         iny
         bne cs_loop
+        inc src_hi
+        inc dst_hi
+        dec pages_left
+        bne cs_pages
         rts
 
 ; ------------------------------------------------------------
@@ -304,8 +312,7 @@ db_row:
         bcc db_horiz               ; top band (rows 0..THICK-1)
 
         lda #BARRIER_H - BARRIER_THICK
-        cmp #0                     ; (harmless, keeps assembler happy)
-        ; if X >= (H-THICK) => bottom band
+        cmp #0
         cpx #(BARRIER_H - BARRIER_THICK)
         bcs db_horiz
 
@@ -333,10 +340,8 @@ db_sides:
         inx
         jmp db_row
 
-
-        ; ---- top/bottom bands: draw horizontal run (thick cap) ----
+; ---- top/bottom bands: draw horizontal run (thick cap) ----
 db_horiz:
-        ; draw from left..right
         ldy bar_left
         lda #CH_WALL_SOLID
 db_hloop:
@@ -345,7 +350,6 @@ db_hloop:
         cpy #bar_right_plus1
         bne db_hloop
 
-        ; colors for left..right
         txa
         clc
         adc #BARRIER_ROW
@@ -365,26 +369,13 @@ db_cloop:
 db_done:
         rts
 
-; --- temp bytes (can live anywhere in RAM; ZP not required) ---
 bar_left:        .byte 0
 bar_right:       .byte 0
-
-; right+1 helper (computed constant-ish each row)
-; we’ll store bar_right+1 into this by using Y compare target
-; easiest: use a fixed byte we update each row, but since bar_right is constant,
-; we can precompute it once as an assembled constant:
 bar_right_plus1  = (BARRIER_COL + BARRIER_W)
 
-; ------------------------------------------------------------
-; Left-edge shape table (offsets from BARRIER_COL).
-; This makes a wedge "<" with a FLAT nose (rows 5..7).
-; Smaller number = further left.
-; ------------------------------------------------------------
 barrier_left:
         .byte 7,6,5,4,3,3,3,3,4,5,6,7,8
 
-; ------------------------------------------------------------
-; Draw zone and wall using screen RAM (rows 3..21)
 ; ------------------------------------------------------------
 draw_zone_and_wall:
         ldx #ZONE_ROW_TOP
@@ -393,32 +384,20 @@ dz_row:
         beq dz_done
 
         jsr fill_row_zone
-
-        ;lda #CH_WALL_SOLID
-        ;jsr fill_row_wall
-
         inx
         jmp dz_row
 dz_done:
         rts
 
-
-
-; ------------------------------------------------------------
-; Fill zone columns on row X with repeating chars 1,2,3,2
-; Preserves X for caller (critical!)
-; ------------------------------------------------------------
 fill_row_zone:
         txa
-        pha                     ; save row counter X on stack
-
-        ; A still has row value here
-        jsr row_to_ptr          ; dst_lo/dst_hi = SCREEN + row*40
+        pha
+        jsr row_to_ptr
 
         ldy #ZONE_COL_L
-        lda #0                  ; pattern index 0..3
+        lda #0
 fz_loop:
-        tax                     ; X = pattern index (temporary)
+        tax
         lda zone_chars,x
         sta (dst_lo),y
 
@@ -434,12 +413,10 @@ fz_loop:
 
 fz_done:
         pla
-        tax                     ; restore row counter X
+        tax
         rts
 
 zone_chars: .byte CH_ZONE_A, CH_ZONE_B, CH_ZONE_C, CH_ZONE_B
-
-
 
 fill_row_wall:
         pha
@@ -455,12 +432,8 @@ frw:
         rts
 
 ; ------------------------------------------------------------
-; Row->pointer: dst = SCREEN + row*40
-; Input: A=row (0..24). Output: dst_lo/dst_hi set.
-; Clobbers: A,Y  (does NOT clobber X)
-; ------------------------------------------------------------
 row_to_ptr:
-        tay                     ; Y = row (save it BEFORE clobbering A)
+        tay
 
         lda #<SCREEN
         sta dst_lo
@@ -484,36 +457,44 @@ rtp_no_c:
 rtp_done:
         rts
 
-
 ; ------------------------------------------------------------
 init_sprites:
-        ; sprite pointers: $3000/64 = $c0
-        lda #$c0
+        ; pointers (note sprite0 is dynamic; default RIGHT)
+        lda #SPR0_PTR_RIGHT
         sta SPR_PTRS+0
-        lda #$c1
+        lda #SPR1_PTR_ALIEN
         sta SPR_PTRS+1
-        lda #$c2
+        lda #SPR2_PTR_MISS
         sta SPR_PTRS+2
-        lda #$c3
+        lda #SPR3_PTR_SHOT
         sta SPR_PTRS+3
 
         lda #%00001111
         sta $d015
 
-        ;lda $d01b
-        ;ora #%11111101    ; sprite 1 behind background (bit1)
-        lda #$00
+        ; sprite 1 behind background (alien behind barrier)
+        lda #%00000010
         sta $d01b
 
+        ; multicolor mode for sprites 0-3
+        lda #%00001111
+        sta $d01c
 
-        lda #14
-        sta $d027
-        lda #7
-        sta $d028
-        lda #2
-        sta $d029
-        lda #15
-        sta $d02a
+        ; hazy shared multicolor for sprites (grays)
+        lda #11          ; dark gray
+        sta $d025
+        lda #12          ; gray
+        sta $d026
+
+        ; per-sprite colors
+        lda #1           ; white
+        sta $d027        ; sprite0 player
+
+        lda #13          ; light green
+        sta $d028        ; sprite1 alien
+        sta $d029        ; sprite2 missile (alien bullet)
+        lda #1
+        sta $d02a        ; sprite3 player shot (white)
 
         lda yar_x
         sta $d000
@@ -529,68 +510,57 @@ init_sprites:
         sta $d006
         sta $d007
 
-        ;lda #0
-        ;sta $d010
-
         ; enemy sprite (sprite 1) inside the barrier opening
-        ENEMY_X = (BARRIER_COL+6)*8     ; adjust +4..+6 to taste
-        ENEMY_Y = (BARRIER_ROW+9)*8     ; middle-ish
+        ENEMY_X = (BARRIER_COL+10)*8
+        ENEMY_Y = (BARRIER_ROW+11)*8
 
         lda #<ENEMY_X
         sta $d002
 
         lda $d010
-        and #%11111101          ; clear sprite1 MSB
-        ora #(((ENEMY_X >> 8) & 1) << 1)   ; set if needed
+        and #%11111101
+        ora #(((ENEMY_X >> 8) & 1) << 1)
         sta $d010
 
         lda #ENEMY_Y
         sta $d003
 
-
         rts
 
+; ------------------------------------------------------------
 init_irq:
         sei
 
-        ; disable all CIA IRQ sources (optional but good)
         lda #$7f
         sta $dc0d
         sta $dd0d
         lda $dc0d
         lda $dd0d
 
-        ; install IRQ/BRK vector at $FFFE (KERNAL is banked out with $01=$35)
         lda #<irq
         sta $fffe
         lda #>irq
         sta $ffff
 
-        ; NMI (RESTORE) -> just RTI
         lda #<nmi
         sta $fffa
         lda #>nmi
         sta $fffb
 
-        ; make sure raster high-bit is 0 and display is enabled (DEN=1)
         lda #$1b
         sta $d011
 
-        ; choose a stable raster line (avoid 0 while debugging)
         lda #$f8
         sta $d012
 
-        ; clear any pending raster IRQ (write-1-to-clear)
         lda #$01
         sta $d019
 
-        ; enable raster IRQ
         lda #$01
         sta $d01a
 
         cli
         rts
-
 
 irq:
         pha
@@ -599,14 +569,13 @@ irq:
         tya
         pha
 
-; keep banking correct even if something toggles it
         lda #$2f
         sta $00
         lda #$35
         sta $01
 
-        lda $dc0d       ; ack CIA1 if it caused the IRQ
-        lda $dd0d       ; ack CIA2 if it caused the IRQ
+        lda $dc0d
+        lda $dd0d
 
         lda #$01
         sta $d019
@@ -618,7 +587,6 @@ irq:
         jmp irq_zone_off
 
 irq_frame:
-        ; periodically toggle blanking and rewrite the zone chars
         lda frame_counter
         and #ZONE_BLANK_MASK
         bne +
@@ -650,15 +618,9 @@ irq_zone_on:
         sta irq_state
         lda #RASTER_ZONE_OFF
         sta $d012
-
-
-
         jmp irq_exit
 
 irq_zone_off:
-        ;lda #6
-        ;sta $d021
-
         lda #0
         sta irq_state
         lda #RASTER_FRAME
@@ -675,18 +637,9 @@ irq_exit:
 nmi:
         rti
 
-;shimmer_table:   .byte 14,3,13,5,12,7,15,2,10,9,11,4,8,1,6,0
-;shimmer_table2:  .byte 3,13,5,12,7,15,2,10,9,11,4,8,1,6,0,14
-
 shimmer_table:   .byte 0,0,0,12,0,12,0,12, 12,11,0,0,0,11,12,12
 shimmer_table2:  .byte 0,0,12,11,0,11,0,15, 11,0,00,12,0,0,0,12
 
-
-; ------------------------------------------------------------
-; zone_update_chars
-; If zone_blank=1, fill zone area with CH_SPACE.
-; If zone_blank=0, restore repeating zone pattern (1,2,3,2...).
-; Preserves X (caller).
 ; ------------------------------------------------------------
 zone_update_chars:
         txa
@@ -698,12 +651,11 @@ zuc_row:
         beq zuc_done
 
         txa
-        jsr row_to_ptr          ; dst_lo/dst_hi = SCREEN row (X preserved by row_to_ptr)
+        jsr row_to_ptr
 
         lda zone_blank
         beq zuc_pattern
 
-; --- blank fill ---
         ldy #ZONE_COL_L
         lda #CH_SPACE
 zuc_bloop:
@@ -715,12 +667,11 @@ zuc_bloop:
         inx
         jmp zuc_row
 
-; --- pattern fill (1,2,3,2 repeating) ---
 zuc_pattern:
-        stx zone_rowtmp         ; save current row
+        stx zone_rowtmp
 
         ldy #ZONE_COL_L
-        ldx #0                  ; X = pattern index 0..3
+        ldx #0
 zuc_ploop:
         lda zone_chars,x
         sta (dst_lo),y
@@ -735,7 +686,7 @@ zuc_ploop:
         jmp zuc_ploop
 
 zuc_pdone:
-        ldx zone_rowtmp         ; restore row
+        ldx zone_rowtmp
         inx
         jmp zuc_row
 
@@ -744,11 +695,10 @@ zuc_done:
         tax
         rts
 
-
 ; ------------------------------------------------------------
 game_update:
         jsr read_joy_move_yar
-         jsr update_shot
+        jsr update_shot
 
         lda frame_counter
         and #MISSILE_SLOW_MASK
@@ -763,40 +713,31 @@ skip_missile:
         rts
 
 ; ------------------------------------------------------------
-; update_shot
-; shot_state=0: sit at left, follow yar_y, wait for fire edge
-; shot_state=1: move right until offscreen, then reset
-; ------------------------------------------------------------
 update_shot:
-        ; read joystick and isolate fire bit (bit4)
         lda JOY2
-        and #$10              ; $10 = fire bit (1=released, 0=pressed)
-        tax                   ; save current fire bit in X
+        and #$10
+        tax
 
-        ; detect "new press": prev was released (nonzero), now pressed (zero)
         lda fire_prev
-        beq us_prev_pressed   ; prev was 0 (pressed)
+        beq us_prev_pressed
         cpx #$00
-        bne us_no_new_press   ; still released -> no press
-        ; NEW PRESS!
+        bne us_no_new_press
+
         lda shot_state
-        bne us_no_new_press   ; already flying, ignore
+        bne us_no_new_press
         lda #1
         sta shot_state
-        ; lock Y at the moment of fire
         lda yar_y
         sta shot_y
 us_no_new_press:
 
 us_prev_pressed:
-        ; store current fire bit for next frame
         txa
         sta fire_prev
 
         lda shot_state
         bne us_flying
 
-; --- READY: follow Yar ---
         lda #SHOT_START_X
         sta shot_x
         lda #0
@@ -814,15 +755,14 @@ us_flying:
         inc shot_x_hi
 +
 
-        ; if (shot >= SHOT_OFFSCREEN) reset
         lda shot_x_hi
         cmp #SHOT_OFFSCREEN_HI
-        bcc us_done            ; hi < offscreen_hi => still on
-        bne us_reset           ; hi > offscreen_hi => offscreen
+        bcc us_done
+        bne us_reset
 
         lda shot_x
         cmp #SHOT_OFFSCREEN_LO
-        bcc us_done            ; lo < offscreen_lo => still on
+        bcc us_done
 
 us_reset:
         lda #0
@@ -837,11 +777,15 @@ us_reset:
 us_done:
         rts
 
-
-
+; ------------------------------------------------------------
+; Joystick movement + sprite0 direction swap (RIGHT/UP/DOWN/LEFT)
+; ------------------------------------------------------------
 read_joy_move_yar:
-; left (bit2 low)
         lda JOY2
+        sta joy_state
+
+; left (bit2 low)
+        lda joy_state
         and #%00000100
         bne no_left
 
@@ -850,18 +794,17 @@ read_joy_move_yar:
         sbc #2
         sta yar_x
         bcs +
-        dec yar_x_hi          ; borrow into MSB
+        dec yar_x_hi
 +
-; clamp min (24)
         lda yar_x_hi
-        bpl +                ; avoid $FF going weird
+        bpl +
         lda #PLAYER_MIN_X_HI
         sta yar_x_hi
         lda #PLAYER_MIN_X_LO
         sta yar_x
 +
         lda yar_x_hi
-        bne no_left           ; if hi=1, we're definitely > min
+        bne no_left
         lda yar_x
         cmp #PLAYER_MIN_X_LO
         bcs no_left
@@ -870,7 +813,7 @@ read_joy_move_yar:
 no_left:
 
 ; right (bit3 low)
-        lda JOY2
+        lda joy_state
         and #%00001000
         bne no_right
 
@@ -879,9 +822,8 @@ no_left:
         adc #2
         sta yar_x
         bcc +
-        inc yar_x_hi          ; carry into MSB
+        inc yar_x_hi
 +
-; clamp max (343 = $0157)
         lda yar_x_hi
         cmp #PLAYER_MAX_X_HI
         bcc no_right
@@ -896,8 +838,8 @@ clamp_max:
         sta yar_x
 no_right:
 
-        lda JOY2
-        ; up (bit0 low)
+; up (bit0 low)
+        lda joy_state
         and #%00000001
         bne no_up
         lda yar_y
@@ -906,8 +848,8 @@ no_right:
         sta yar_y
 no_up:
 
-        lda JOY2
-        ; down (bit1 low)
+; down (bit1 low)
+        lda joy_state
         and #%00000010
         bne no_down
         lda yar_y
@@ -915,20 +857,54 @@ no_up:
         adc #2
         sta yar_y
 no_down:
+
+; ---- sprite0 direction frame selection ----
+; priority: left > right > up > down > default right
+        lda joy_state
+        and #%00000100
+        beq spr_left
+
+        lda joy_state
+        and #%00001000
+        beq spr_right
+
+        lda joy_state
+        and #%00000001
+        beq spr_up
+
+        lda joy_state
+        and #%00000010
+        beq spr_down
+
+        lda #SPR0_PTR_RIGHT
+        bne spr_set
+
+spr_left:
+        lda #SPR0_PTR_LEFT
+        bne spr_set
+spr_right:
+        lda #SPR0_PTR_RIGHT
+        bne spr_set
+spr_up:
+        lda #SPR0_PTR_UP
+        bne spr_set
+spr_down:
+        lda #SPR0_PTR_DOWN
+
+spr_set:
+        sta SPR_PTRS+0
         rts
 
+; ------------------------------------------------------------
 update_missile:
-; --- X: move miss toward yar using 9-bit compare ---
         lda miss_x_hi
         cmp yar_x_hi
         bne mx_hi_diff
 
-; hi equal, compare low
         lda miss_x
         cmp yar_x
         beq umx_done
         bcc umx_inc
-        ; miss > yar
 umx_dec:
         lda miss_x
         sec
@@ -945,23 +921,22 @@ umx_inc:
         jmp umx_done
 
 mx_hi_diff:
-        bcc umx_inc      ; miss_hi < yar_hi => increase
-        jmp umx_dec      ; miss_hi > yar_hi => decrease
+        bcc umx_inc
+        jmp umx_dec
 
 umx_done:
-
-; --- Y is unchanged ---
         lda miss_y
         cmp yar_y
         beq umy_done
         bcc umy_inc
         dec miss_y
         jmp umy_done
-umy_inc: inc miss_y
+umy_inc:
+        inc miss_y
 umy_done:
         rts
 
-
+; ------------------------------------------------------------
 write_positions:
         lda yar_x
         sta $d000
@@ -978,34 +953,26 @@ write_positions:
         lda shot_y
         sta $d007
 
-         ; ---- build D010 MSB bits fresh ----
         lda #0
 
-        ; sprite 0 (player)
         ldx yar_x_hi
         beq +
         ora #%00000001
 +
+        ora #%00000010
 
-        ; sprite 1 (enemy) - ENEMY_X is 264, so MSB=1
-        ora #%00000010    ; bit1 set (since 264>255)
-
-        ; sprite 2 (missile)
         ldx miss_x_hi
         beq +
         ora #%00000100
 +
-
-        ; sprite 3 (shot)
         ldx shot_x_hi
         beq +
-        ora #%00001000         ; bit3
+        ora #%00001000
 +
-
         sta $d010
-
         rts
 
+; ------------------------------------------------------------
 zone_shimmer:
         inc zone_phase
         lda zone_phase
@@ -1036,20 +1003,12 @@ zs_col:
 zs_done:
         rts
 
-
 tmp_phase: .byte 0
 
-; optional: tiny 0..15 offsets for rows; table just needs to exist
 row_xor:
         .byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         .byte 0,1,2,3,4,5,6,7,8
-        ; (only first ~22 used)
 
-; ------------------------------------------------------------
-; Row->pointer for COLOR RAM: dst = COLORRAM + row*40
-; Input: A=row (0..24)
-; Output: dst_lo/dst_hi
-; Clobbers: A,Y (preserves X)
 ; ------------------------------------------------------------
 row_to_color_ptr:
         pha
@@ -1076,96 +1035,127 @@ rtcp_no_c:
 rtcp_done:
         rts
 
-
 ; ------------------------------------------------------------
 ; Assets
 ; ------------------------------------------------------------
 charset_data:
-        ; char 0
         .rept 8
         .byte 0
         .endrept
 
-        ; char 1 (zone A) - multicolor noise
         .byte $1b,$e4,$b1,$4e,$d8,$27,$72,$8d
-
-        ; char 2 (zone B) - different noise
         .byte $4e,$1b,$8d,$72,$27,$d8,$e4,$b1
-
-        ; char 3 (zone C) - stripes/noise mix
         .byte $55,$aa,$1b,$e4,$55,$aa,$4e,$b1
 
-        ; chars 4..9 empty (6 chars)
         .rept (6*8)
         .byte 0
         .endrept
 
-        ; char 10 wall solid
         .byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff
-        ; char 11
         .byte $ff,$ff,$ef,$ef,$ef,$ff,$ff,$ff
-        ; char 12
         .byte $ff,$ef,$c7,$c7,$c7,$ef,$ff,$ff
-        ; char 13
         .byte $ef,$c7,$83,$83,$83,$c7,$ef,$ff
-        
 
-        ; pad to 2048 bytes total (we've defined 14 chars = 112 bytes)
         .rept (2048 - (14*8))
         .byte 0
         .endrept
 
-yar_x_hi:   .byte 0     ; 0 or 1
-miss_x_hi:  .byte 0     ; 0 or 1
+yar_x_hi:   .byte 0
+miss_x_hi:  .byte 0
 shot_x_hi:  .byte 0
 
-zone_blank: .byte 0   ; 0=normal zone chars, 1=blank zone chars
+zone_blank:  .byte 0
 zone_rowtmp: .byte 0
 
+; ------------------------------------------------------------
+; sprite_data: 512 bytes copied to $3000
+; Layout:
+;   $3000 sprite0 RIGHT
+;   $3040 sprite0 UP
+;   $3080 sprite0 DOWN
+;   $30C0 sprite0 LEFT
+;   $3100 sprite1 alien
+;   $3140 sprite2 missile
+;   $3180 sprite3 shot
+; ------------------------------------------------------------
 sprite_data:
-        ; sprite 0 (yar)
-        ; sprite 0 (player) - arrow/ship (hi-res)
-        .byte $00,$00,$00
-        .byte $00,$00,$00
-        .byte $00,$00,$00
 
-        .byte $03,$F0,$00
-        .byte $07,$F8,$00
-        .byte $0F,$FC,$00
-        .byte $1F,$FE,$00
-        .byte $3F,$FF,$00
-        .byte $7F,$FF,$80
-        .byte $FF,$FF,$C0
-        .byte $FF,$FF,$E0
-        .byte $FF,$FF,$F0
-        .byte $FF,$FF,$E0
-        .byte $FF,$FF,$C0
-        .byte $7F,$FF,$80
-        .byte $3F,$FF,$00
-        .byte $1F,$FE,$00
-        .byte $0F,$FC,$00
-        .byte $07,$F8,$00
-        .byte $03,$F0,$00
+; sprite0 RIGHT (data 0)
+sprite_0_right:
+        .byte $00,$00,$00,$02,$00,$00,$02,$00
+        .byte $00,$02,$00,$00,$02,$a0,$00,$02
+        .byte $a0,$20,$08,$28,$20,$08,$28,$20
+        .byte $0a,$82,$80,$0a,$82,$80,$0a,$82
+        .byte $80,$0a,$82,$80,$08,$28,$20,$08
+        .byte $28,$20,$02,$a0,$20,$02,$a0,$00
+        .byte $02,$00,$00,$02,$00,$00,$02,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-        .byte $00,$00,$00
-        .byte $00,$00,$00
-        .byte $00,$00,$00
+; sprite0 UP (data 1)
+sprite_0_up:
+        .byte $00,$00,$00,$00,$00,$00,$00,$82
+        .byte $00,$00,$82,$00,$00,$28,$00,$00
+        .byte $28,$00,$00,$28,$00,$00,$28,$00
+        .byte $00,$82,$00,$00,$82,$00,$00,$82
+        .byte $00,$02,$00,$80,$02,$28,$80,$02
+        .byte $28,$80,$0a,$28,$a0,$0a,$aa,$a0
+        .byte $00,$aa,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$83
+
+; sprite0 DOWN (data 2)
+sprite_0_down:
+        .byte $00,$00,$00,$00,$00,$00,$00,$aa
+        .byte $00,$00,$aa,$00,$0a,$28,$a0,$0a
+        .byte $28,$a0,$02,$28,$80,$02,$00,$80
+        .byte $00,$82,$00,$00,$82,$00,$00,$82
+        .byte $00,$00,$28,$00,$00,$28,$00,$00
+        .byte $28,$00,$00,$28,$00,$00,$82,$00
+        .byte $00,$82,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$83
+
+; sprite0 LEFT (data 3)
+sprite_0_left:
+        .byte $00,$00,$00,$00,$00,$80,$00,$00
+        .byte $80,$00,$00,$80,$00,$0a,$80,$08
+        .byte $0a,$80,$08,$28,$20,$08,$28,$20
+        .byte $02,$82,$a0,$02,$82,$a0,$02,$82
+        .byte $a0,$02,$82,$a0,$08,$28,$20,$08
+        .byte $28,$20,$08,$0a,$80,$00,$0a,$80
+        .byte $00,$00,$80,$00,$00,$80,$00,$00
+        .byte $80,$00,$00,$00,$00,$00,$00,$83
+
+; sprite1 (alien / qotile)
+.byte $00,$00,$00,$00,$28,$00,$00,$a8
+.byte $00,$02,$a8,$00,$0a,$28,$00,$a8
+.byte $28,$00,$a0,$28,$00,$a0,$28,$00
+.byte $aa,$a8,$00,$a0,$28,$00,$a0,$28
+.byte $00,$a8,$28,$00,$0a,$28,$00,$02
+.byte $a8,$00,$00,$a8,$00,$00,$28,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$83
+
+; sprite2 (missile / alien bullet)
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$aa,$00,$00,$aa,$00,$00
+.byte $aa,$00,$00,$aa,$00,$00,$aa,$00
+.byte $00,$aa,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$83
+
+; sprite3 (shot)
+        
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$aa
+.byte $a0,$00,$55,$50,$00,$55,$50,$00
+.byte $ff,$f0,$00,$ff,$f0,$00,$55,$50
+.byte $00,$55,$50,$00,$aa,$a0,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$00
+.byte $00,$00,$00,$00,$00,$00,$00,$83
+
+; pad sprite_data to 512 bytes so our 2-page copy is safe
+        .rept (512 - (7*64))
         .byte 0
-
-        ; sprite 1 (qotile)
-        .rept 21
-        .byte %00100100, %00011000, %00100100
         .endrept
-        .byte 0
-
-        ; sprite 2 (missile)
-        .rept 21
-        .byte %00011000, %00011000, %00011000
-        .endrept
-        .byte 0
-
-        ; sprite 3 (shot)
-        .rept 21
-        .byte %00000000, %00011000, %00000000
-        .endrept
-        .byte 0
