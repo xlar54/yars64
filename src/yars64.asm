@@ -81,8 +81,9 @@ SPR0_PTR_UP     = $c1   ; $3040
 SPR0_PTR_DOWN   = $c2   ; $3080
 SPR0_PTR_LEFT   = $c3   ; $30c0
 SPR1_PTR_ALIEN  = $c4   ; $3100
-SPR2_PTR_MISS   = $c5   ; $3140
-SPR3_PTR_SHOT   = $c6   ; $3180
+SPR2_PTR_MISS   = $c5   ; $3140  (SMALL sprite data)  enemy missile
+SPR3_PTR_SHOT   = $c6   ; $3180  (LARGE sprite data)  enemy/player missile
+SPR4_PTR_BULLET = $c7   ; $31c0  (NEW sprite data)    player bullet
 
 ; --- Lose/Explosion constants ---
 EXPLODE_MID_ROW      = 12
@@ -99,6 +100,22 @@ PLAYER_HIT_Y_OFF    = 10
 COLLIDE_MISS_X_THR  = 8     ; tune these (smaller = stricter)
 COLLIDE_MISS_Y_THR  = 8
 
+; ---- Player bullets (pre-unlock) ----
+DIR_RIGHT = 0
+DIR_UP    = 1
+DIR_DOWN  = 2
+DIR_LEFT  = 3
+
+BULLET_SPEED     = 4
+BULLET_OFF_Y     = 250      ; park offscreen-ish
+BULLET_OFF_X     = 0
+
+; ---- Player missile (left-side, post-unlock) ----
+PMISS_START_X_LO = PLAYER_MIN_X_LO   ; 24
+PMISS_START_X_HI = PLAYER_MIN_X_HI   ; 0
+PMISS_SPEED      = 4
+PMISS_OFFSCREEN_LO = $68
+PMISS_OFFSCREEN_HI = 1
 
 ; ----------------------------
 ; Game variables (zero page)
@@ -221,6 +238,30 @@ reset_level_vars:
         sta game_mode
         sta explode_radius
         sta explode_wait
+
+        ; direction setup and bullet state
+        lda #DIR_RIGHT
+        sta player_dir
+
+        lda #0
+        sta bullet_state
+        sta bullet_dir
+        sta bullet_x_hi
+        lda #BULLET_OFF_X
+        sta bullet_x
+        lda #BULLET_OFF_Y
+        sta bullet_y
+
+        lda #0
+        sta pmiss_unlocked
+        sta pmiss_state
+        lda #PMISS_START_X_LO
+        sta pmiss_x
+        lda #PMISS_START_X_HI
+        sta pmiss_x_hi
+        lda yar_y
+        sta pmiss_y
+
         rts
 
 ; ------------------------------------------------------------
@@ -442,7 +483,7 @@ zone_chars: .byte CH_ZONE_A, CH_ZONE_B, CH_ZONE_C, CH_ZONE_B
 fill_row_zone_full:
         pha                 ; save row
         jsr row_to_ptr      ; uses A=row
-        pla                 ; restore row (not needed, but keeps stack clean)
+        pla                 ; restore row
 
         ldy #0
         ldx #0
@@ -488,15 +529,25 @@ rtp_done:
 
 ; ------------------------------------------------------------
 init_sprites:
+        ; sprite pointers
         lda #SPR0_PTR_RIGHT
         sta SPR_PTRS+0
         lda #SPR1_PTR_ALIEN
         sta SPR_PTRS+1
+
+        ; sprite2 = enemy missile (SMALL)
         lda #SPR2_PTR_MISS
         sta SPR_PTRS+2
-        lda #SPR3_PTR_SHOT
+
+        ; sprite3 = player bullet (NEW sprite)
+        lda #SPR4_PTR_BULLET
         sta SPR_PTRS+3
 
+        ; sprite4 = player missile (LARGE sprite)
+        lda #SPR3_PTR_SHOT
+        sta SPR_PTRS+4
+
+        ; enable some sprites initially (write_positions manages dynamically too)
         lda #%00001111
         sta $d015
 
@@ -504,8 +555,8 @@ init_sprites:
         lda #%00000010
         sta $d01b
 
-        ; multicolor mode for sprites 0-3
-        lda #%00001111
+        ; ALL sprites multicolor (0..4)
+        lda #%00011111
         sta $d01c
 
         ; shared multicolor
@@ -516,13 +567,19 @@ init_sprites:
 
         ; per-sprite colors
         lda #1
-        sta $d027        ; player white
+        sta $d027        ; sprite0 player white
 
         lda #13
-        sta $d028        ; alien light green
-        sta $d029        ; alien bullet light green
+        sta $d028        ; sprite1 alien light green
+
+        lda #13
+        sta $d029        ; sprite2 enemy missile light green
+
         lda #1
-        sta $d02a        ; player shot white
+        sta $d02a        ; sprite3 player bullet white
+
+        lda #1
+        sta $d02b        ; sprite4 player missile white
 
         ; positions
         lda yar_x
@@ -530,14 +587,19 @@ init_sprites:
         lda yar_y
         sta $d001
 
+        lda #0
+        sta $d006
+        sta $d007
+
+        lda pmiss_x
+        sta $d008
+        lda pmiss_y
+        sta $d009
+
         lda miss_x
         sta $d004
         lda miss_y
         sta $d005
-
-        lda #0
-        sta $d006
-        sta $d007
 
         ; enemy sprite (sprite 1) inside the barrier opening
         ENEMY_X = (BARRIER_COL+10)*8
@@ -752,14 +814,15 @@ zuc_done:
 ; ------------------------------------------------------------
 game_update:
         jsr read_joy_move_yar
-        jsr update_shot
+
+        jsr check_unlock_player_missile
+        jsr update_player_fire
 
         ; collision: enemy hits player => lose
         jsr check_player_enemy_collision
-        
+
         ; collision: enemy missile hits player => lose
         jsr check_player_missile_collision
-
 
         lda frame_counter
         and #MISSILE_SLOW_MASK
@@ -773,73 +836,232 @@ skip_missile:
         jsr write_positions
         rts
 
-; ------------------------------------------------------------
-update_shot:
+check_unlock_player_missile:
+        lda pmiss_unlocked
+        bne cul_done
+
+        ; row = (yar_y + PLAYER_HIT_Y_OFF) / 8
+        lda yar_y
+        clc
+        adc #PLAYER_HIT_Y_OFF
+        lsr
+        lsr
+        lsr
+        tax                     ; X=row (0..24-ish)
+
+        ; col = (yar_x + PLAYER_HIT_X_OFF) / 8  (handles hi bit => +32 cols)
+        lda yar_x
+        clc
+        adc #PLAYER_HIT_X_OFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+
+        lda tmp1_lo
+        lsr
+        lsr
+        lsr
+        sta tmp2_lo             ; tmp2_lo = col base
+
+        lda tmp1_hi
+        beq cul_col_ok
+        clc
+        lda tmp2_lo
+        adc #32
+        sta tmp2_lo
+cul_col_ok:
+
+        ; read screen char at (row,col)
+        txa
+        jsr row_to_ptr
+        ldy tmp2_lo
+        lda (dst_lo),y
+
+        ; wall chars are 10..13
+        cmp #CH_WALL_SOLID
+        bcc cul_done
+        cmp #CH_WALL_DMG3+1
+        bcs cul_done
+
+        ; UNLOCK!
+        lda #1
+        sta pmiss_unlocked
+        lda #0
+        sta pmiss_state
+
+        lda #PMISS_START_X_LO
+        sta pmiss_x
+        lda #PMISS_START_X_HI
+        sta pmiss_x_hi
+        lda yar_y
+        sta pmiss_y
+
+cul_done:
+        rts
+
+update_player_fire:
+        ; edge-detect fire
         lda JOY2
         and #$10
         tax
 
         lda fire_prev
-        beq us_prev_pressed
+        beq upf_prev_pressed
         cpx #$00
-        bne us_no_new_press
+        bne upf_no_new_press
 
-        lda shot_state
-        bne us_no_new_press
+        ; NEW press detected here -----------------
+
+        lda pmiss_unlocked
+        bne upf_fire_pmiss
+
+        ; ---- fire BULLET (sprite3) if inactive ----
+        lda bullet_state
+        bne upf_no_new_press
+
         lda #1
-        sta shot_state
-        lda yar_y
-        sta shot_y
-us_no_new_press:
+        sta bullet_state
+        lda player_dir
+        sta bullet_dir
 
-us_prev_pressed:
+        lda yar_x
+        sta bullet_x
+        lda yar_x_hi
+        sta bullet_x_hi
+        lda yar_y
+        sta bullet_y
+        jmp upf_no_new_press
+
+upf_fire_pmiss:
+        ; ---- fire LEFT MISSILE (sprite4) if parked ----
+        lda pmiss_state
+        bne upf_no_new_press
+
+        lda #1
+        sta pmiss_state
+        lda #PMISS_START_X_LO
+        sta pmiss_x
+        lda #PMISS_START_X_HI
+        sta pmiss_x_hi
+        lda yar_y
+        sta pmiss_y
+
+upf_no_new_press:
+upf_prev_pressed:
         txa
         sta fire_prev
 
-        lda shot_state
-        bne us_flying
+        ; ---- update bullet motion ----
+        lda bullet_state
+        beq upf_bullet_done
 
-        lda #SHOT_START_X
-        sta shot_x
-        lda #0
-        sta shot_x_hi
-        lda yar_y
-        sta shot_y
-        rts
-
-us_flying:
-        lda shot_x
+        lda bullet_dir
+        cmp #DIR_RIGHT
+        beq bdir_right
+        cmp #DIR_LEFT
+        beq bdir_left
+        cmp #DIR_UP
+        beq bdir_up
+        ; else down
+bdir_down:
+        lda bullet_y
         clc
-        adc #SHOT_SPEED
-        sta shot_x
+        adc #BULLET_SPEED
+        sta bullet_y
+        cmp #240
+        bcc upf_bullet_done
+        jmp bullet_reset
+
+bdir_up:
+        lda bullet_y
+        sec
+        sbc #BULLET_SPEED
+        sta bullet_y
+        bcs upf_bullet_done
+        jmp bullet_reset
+
+bdir_left:
+        lda bullet_x
+        sec
+        sbc #BULLET_SPEED
+        sta bullet_x
+        bcs upf_bullet_done
+        dec bullet_x_hi
+        lda bullet_x_hi
+        bmi bullet_reset
+        jmp upf_bullet_done
+
+bdir_right:
+        lda bullet_x
+        clc
+        adc #BULLET_SPEED
+        sta bullet_x
         bcc +
-        inc shot_x_hi
+        inc bullet_x_hi
 +
-
-        lda shot_x_hi
+        lda bullet_x_hi
         cmp #SHOT_OFFSCREEN_HI
-        bcc us_done
-        bne us_reset
-
-        lda shot_x
+        bcc upf_bullet_done
+        bne bullet_reset
+        lda bullet_x
         cmp #SHOT_OFFSCREEN_LO
-        bcc us_done
+        bcc upf_bullet_done
 
-us_reset:
+bullet_reset:
         lda #0
-        sta shot_state
-        lda #SHOT_START_X
-        sta shot_x
+        sta bullet_state
+        lda #BULLET_OFF_X
+        sta bullet_x
         lda #0
-        sta shot_x_hi
+        sta bullet_x_hi
+        lda #BULLET_OFF_Y
+        sta bullet_y
+
+upf_bullet_done:
+
+        ; ---- update player missile motion ----
+        lda pmiss_state
+        beq upf_done
+
+        ; missile flies RIGHT
+        lda pmiss_x
+        clc
+        adc #PMISS_SPEED
+        sta pmiss_x
+        bcc +
+        inc pmiss_x_hi
++
+        lda pmiss_x_hi
+        cmp #PMISS_OFFSCREEN_HI
+        bcc upf_done
+        bne pmiss_reset
+        lda pmiss_x
+        cmp #PMISS_OFFSCREEN_LO
+        bcc upf_done
+
+pmiss_reset:
+        lda #0
+        sta pmiss_state
+
+        ; disable / re-lock the player missile so we go back to bullets
+        sta pmiss_unlocked
+
+        ; (optional) park values (not required since it's hidden now)
+        lda #PMISS_START_X_LO
+        sta pmiss_x
+        lda #PMISS_START_X_HI
+        sta pmiss_x_hi
         lda yar_y
-        sta shot_y
+        sta pmiss_y
 
-us_done:
+upf_done:
         rts
+
 
 ; ------------------------------------------------------------
 ; Joystick movement + sprite0 direction swap (RIGHT/UP/DOWN/LEFT)
+; Keeps facing direction when centered
 ; ------------------------------------------------------------
 read_joy_move_yar:
         lda JOY2
@@ -919,7 +1141,23 @@ no_up:
         sta yar_y
 no_down:
 
+; --- keep parked left-missile glued to player Y ---
+        lda pmiss_unlocked
+        beq +
+        lda pmiss_state          ; 0=parked/ready
+        bne +
+        lda yar_y
+        sta pmiss_y
++
+
+
 ; ---- sprite0 direction frame selection ----
+; If joystick centered (bits 0..3 all 1), keep last facing.
+        lda joy_state
+        and #%00001111
+        cmp #%00001111
+        beq dir_done
+
         lda joy_state
         and #%00000100
         beq spr_left
@@ -936,22 +1174,35 @@ no_down:
         and #%00000010
         beq spr_down
 
-        lda #SPR0_PTR_RIGHT
-        bne spr_set
+dir_done:
+        rts
 
 spr_left:
         lda #SPR0_PTR_LEFT
-        bne spr_set
+        sta SPR_PTRS+0
+        lda #DIR_LEFT
+        sta player_dir
+        rts
+
 spr_right:
         lda #SPR0_PTR_RIGHT
-        bne spr_set
+        sta SPR_PTRS+0
+        lda #DIR_RIGHT
+        sta player_dir
+        rts
+
 spr_up:
         lda #SPR0_PTR_UP
-        bne spr_set
+        sta SPR_PTRS+0
+        lda #DIR_UP
+        sta player_dir
+        rts
+
 spr_down:
         lda #SPR0_PTR_DOWN
-spr_set:
         sta SPR_PTRS+0
+        lda #DIR_DOWN
+        sta player_dir
         rts
 
 ; ------------------------------------------------------------
@@ -997,50 +1248,76 @@ umy_done:
 
 ; ------------------------------------------------------------
 write_positions:
+        ; sprite0 player
         lda yar_x
         sta $d000
         lda yar_y
         sta $d001
 
+        ; sprite2 enemy missile
         lda miss_x
         sta $d004
         lda miss_y
         sta $d005
 
-        lda shot_x
+        ; sprite3 bullet
+        lda bullet_x
         sta $d006
-        lda shot_y
+        lda bullet_y
         sta $d007
 
+        ; sprite4 player missile
+        lda pmiss_x
+        sta $d008
+        lda pmiss_y
+        sta $d009
+
+        ; ----- $d015 enable mask -----
+        lda #%00000111          ; sprites 0,1,2 always on
+
+        ldx bullet_state
+        beq +
+        ora #%00001000          ; sprite3 when bullet flying
++
+        ldx pmiss_unlocked
+        beq +
+        ora #%00010000          ; sprite4 visible once unlocked
++
+        sta $d015
+
+        ; ----- $d010 high X bits -----
         lda #0
 
         ldx yar_x_hi
         beq +
         ora #%00000001
 +
+        ldx enemy_x_hi
+        beq +
         ora #%00000010
-
++
         ldx miss_x_hi
         beq +
         ora #%00000100
 +
-        ldx shot_x_hi
+        ldx bullet_x_hi
         beq +
         ora #%00001000
++
+        ldx pmiss_x_hi
+        beq +
+        ora #%00010000
 +
         sta $d010
         rts
 
 ; ------------------------------------------------------------
 ; Collision: sprite0 (player) vs sprite1 (enemy)
-; Simple bbox: |dx|<24 and |dy|<21
 ; ------------------------------------------------------------
 check_player_enemy_collision:
-        ; if already exploding, skip
         lda game_mode
         bne cpec_done
 
-        ; ---- dx = abs(player_x - enemy_x) on 9-bit ----
         lda yar_x_hi
         cmp enemy_x_hi
         bne dx_hi_diff
@@ -1050,7 +1327,6 @@ check_player_enemy_collision:
         beq dx_zero
         bcc dx_player_lt
 
-; player > enemy
 dx_player_gt:
         lda yar_x
         sec
@@ -1072,7 +1348,6 @@ dx_player_lt:
         jmp dx_check
 
 dx_hi_diff:
-        ; if hi differs, and only 0/1, dx is >=256 or close; treat as no collision
         lda #1
         sta dx_hi
 
@@ -1084,12 +1359,10 @@ dx_check:
         cmp #COLLIDE_X_THRESH
         bcs cpec_done
 
-        ; ---- dy = abs(player_y - enemy_y) ----
         lda yar_y
         cmp enemy_y_val
         beq dy_ok
         bcc dy_player_lt
-        ; player > enemy
         sec
         sbc enemy_y_val
         jmp dy_cmp
@@ -1101,7 +1374,6 @@ dy_cmp:
         cmp #COLLIDE_Y_THRESH
         bcs cpec_done
 dy_ok:
-        ; COLLISION!
         jsr player_lose
 
 cpec_done:
@@ -1112,13 +1384,10 @@ cpec_done:
 ; ------------------------------------------------------------
 check_player_missile_collision:
         lda game_mode
-        
-        beq cpmc_continue     ; opposite condition (short hop)
-        jmp cpmc_done         ; long jump (any distance)
+        beq cpmc_continue
+        jmp cpmc_done
 cpmc_continue:
 
-
-; ---- player_cx = yar_x + PLAYER_HIT_X_OFF (9-bit)
         lda yar_x
         clc
         adc #PLAYER_HIT_X_OFF
@@ -1127,7 +1396,6 @@ cpmc_continue:
         adc #0
         sta tmp1_hi
 
-; ---- miss_cx = miss_x + MISS_HIT_X_OFF (9-bit)
         lda miss_x
         clc
         adc #MISS_HIT_X_OFF
@@ -1136,7 +1404,6 @@ cpmc_continue:
         adc #0
         sta tmp2_hi
 
-; ---- dx = abs(player_cx - miss_cx)
         lda tmp1_hi
         cmp tmp2_hi
         bne mdx_hi_diff
@@ -1146,7 +1413,6 @@ cpmc_continue:
         beq mdx_ok
         bcc mdx_player_lt
 
-; player > missile
 mdx_player_gt:
         lda tmp1_lo
         sec
@@ -1164,14 +1430,9 @@ mdx_player_lt:
         jmp mdy_calc
 
 mdx_hi_diff:
-        ; centers are in different 256-page => far apart
         jmp cpmc_done
 
 mdx_ok:
-        ; dx == 0, continue to Y
-        ; fall through
-
-; ---- dy using center hit points (8-bit is fine)
 mdy_calc:
         lda yar_y
         clc
@@ -1207,11 +1468,6 @@ hit:
 cpmc_done:
         rts
 
-
-
-; ------------------------------------------------------------
-; Player lose handler (reusable)
-; Starts explosion sequence
 ; ------------------------------------------------------------
 player_lose:
         lda #1
@@ -1221,11 +1477,6 @@ player_lose:
         sta explode_wait
         rts
 
-; ------------------------------------------------------------
-; Explosion update:
-; 1) expand fill from middle row outward
-; 2) when full, wait ~2 seconds
-; 3) restart level
 ; ------------------------------------------------------------
 explosion_update:
         lda explode_wait
@@ -1240,8 +1491,6 @@ eu_not_waiting:
         cmp #EXPLODE_MAX_RADIUS+1
         bcs eu_start_wait
 
-        ; radius = 0..12
-        ; fill mid - r
         lda #EXPLODE_MID_ROW
         sec
         sbc explode_radius
@@ -1249,11 +1498,9 @@ eu_not_waiting:
         jsr fill_row_zone_full
 eu_skip_top:
 
-        ; if radius==0, don't double-fill same row
         lda explode_radius
         beq eu_inc
 
-        ; fill mid + r
         lda #EXPLODE_MID_ROW
         clc
         adc explode_radius
@@ -1272,8 +1519,6 @@ eu_done:
         rts
 
 ; ------------------------------------------------------------
-; Restart level (keeps IRQ installed)
-; ------------------------------------------------------------
 restart_level:
         sei
         jsr reset_level_vars
@@ -1284,9 +1529,6 @@ restart_level:
         cli
         rts
 
-; ------------------------------------------------------------
-; Full-screen shimmer used during explosion
-; (colors all 40 cols on each row)
 ; ------------------------------------------------------------
 explosion_shimmer:
         inc zone_phase
@@ -1390,8 +1632,8 @@ explode_radius:  .byte 0
 explode_wait:    .byte 0
 
 enemy_x_lo:      .byte 0
-enemy_x_hi:      .byte 0    ; 0 or 1 (only need MSB bit)
-enemy_y_val:         .byte 0
+enemy_x_hi:      .byte 0
+enemy_y_val:     .byte 0
 
 dx_lo:           .byte 0
 dx_hi:           .byte 0
@@ -1400,7 +1642,6 @@ tmp1_lo: .byte 0
 tmp1_hi: .byte 0
 tmp2_lo: .byte 0
 tmp2_hi: .byte 0
-
 
 ; ------------------------------------------------------------
 ; Assets
@@ -1434,6 +1675,23 @@ shot_x_hi:  .byte 0
 zone_blank:  .byte 0
 zone_rowtmp: .byte 0
 
+; --- player facing direction ---
+player_dir:      .byte DIR_RIGHT
+
+; --- bullet (sprite3) ---
+bullet_state:    .byte 0        ; 0=inactive, 1=flying
+bullet_dir:      .byte 0
+bullet_x:        .byte 0
+bullet_x_hi:     .byte 0
+bullet_y:        .byte 0
+
+; --- player missile on left (sprite4) ---
+pmiss_unlocked:  .byte 0        ; 0=hidden/locked, 1=visible/unlocked
+pmiss_state:     .byte 0        ; 0=parked/ready, 1=flying
+pmiss_x:         .byte 0
+pmiss_x_hi:      .byte 0
+pmiss_y:         .byte 0
+
 ; ------------------------------------------------------------
 ; sprite_data: 512 bytes copied to $3000
 ; Layout:
@@ -1442,12 +1700,13 @@ zone_rowtmp: .byte 0
 ;   $3080 sprite0 DOWN
 ;   $30C0 sprite0 LEFT
 ;   $3100 sprite1 alien
-;   $3140 sprite2 missile
-;   $3180 sprite3 shot
+;   $3140 sprite2 SMALL enemy missile
+;   $3180 sprite3 LARGE missile/shot
+;   $31C0 sprite4 NEW player bullet
 ; ------------------------------------------------------------
 sprite_data:
 
-; sprite0 RIGHT (data 0)
+; sprite0 RIGHT
 sprite_0_right:
         .byte $00,$00,$00,$02,$00,$00,$02,$00
         .byte $00,$02,$00,$00,$02,$a0,$00,$02
@@ -1458,7 +1717,7 @@ sprite_0_right:
         .byte $02,$00,$00,$02,$00,$00,$02,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; sprite0 UP (data 1)
+; sprite0 UP
 sprite_0_up:
         .byte $00,$00,$00,$00,$00,$00,$00,$82
         .byte $00,$00,$82,$00,$00,$28,$00,$00
@@ -1469,7 +1728,7 @@ sprite_0_up:
         .byte $00,$aa,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; sprite0 DOWN (data 2)
+; sprite0 DOWN
 sprite_0_down:
         .byte $00,$00,$00,$00,$00,$00,$00,$aa
         .byte $00,$00,$aa,$00,$0a,$28,$a0,$0a
@@ -1480,7 +1739,7 @@ sprite_0_down:
         .byte $00,$82,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; sprite0 LEFT (data 3)
+; sprite0 LEFT
 sprite_0_left:
         .byte $00,$00,$00,$00,$00,$80,$00,$00
         .byte $80,$00,$00,$80,$00,$0a,$80,$08
@@ -1491,7 +1750,7 @@ sprite_0_left:
         .byte $00,$00,$80,$00,$00,$80,$00,$00
         .byte $80,$00,$00,$00,$00,$00,$00,$83
 
-; sprite1 (alien / qotile)
+; sprite1 alien
         .byte $00,$00,$00,$00,$28,$00,$00,$a8
         .byte $00,$02,$a8,$00,$0a,$28,$00,$a8
         .byte $28,$00,$a0,$28,$00,$a0,$28,$00
@@ -1501,7 +1760,7 @@ sprite_0_left:
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; sprite2 (missile / alien bullet)
+; sprite2 SMALL enemy missile
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$aa,$80,$00
@@ -1511,7 +1770,7 @@ sprite_0_left:
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; sprite3 (shot)
+; sprite3 LARGE missile/shot
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$aa
         .byte $a0,$00,$55,$50,$00,$55,$50,$00
@@ -1521,7 +1780,24 @@ sprite_0_left:
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; pad sprite_data to 512 bytes so our 2-page copy is safe
-        .rept (512 - (7*64))
-        .byte 0
-        .endrept
+; sprite4 NEW player bullet (small diamond/dot)
+; 21 rows * 3 bytes = 63 bytes, then final byte ($83)
+        ; rows 0..7 empty
+        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00,  $00,$00,$00
+        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00,  $00,$00,$00
+
+        ; rows 8..14 diamond
+        .byte $00,$0c,$00   ; 1 pixel
+        .byte $00,$3c,$00   ; 2 pixels
+        .byte $00,$fc,$00   ; 3 pixels
+        .byte $00,$ff,$00   ; 4 pixels (small block)
+        .byte $00,$fc,$00
+        .byte $00,$3c,$00
+        .byte $00,$0c,$00
+
+        ; rows 15..20 empty
+        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00
+        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00
+
+        ; 64th byte
+        .byte $83
