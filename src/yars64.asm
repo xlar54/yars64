@@ -23,7 +23,7 @@ CIA2            = $dd00
 SCREEN          = $0400
 COLORRAM        = $d800
 
-CHAR_DST        = $2000
+CHAR_DST        = $2800
 SPR_DST         = $3000
 
 SPR_PTRS        = SCREEN + $03f8
@@ -37,8 +37,8 @@ RASTER_ZONE_OFF = 170
 ZONE_ROW_TOP    = 0
 ZONE_ROW_BOTTOM = 25    ; loop ends when X == 25
 
-ZONE_COL_L      = 10
-ZONE_COL_R      = 21
+ZONE_COL_L      = 12
+ZONE_COL_R      = 19
 
 WALL_COL_L      = 23
 WALL_COL_R      = 25
@@ -73,6 +73,16 @@ PLAYER_MAX_X_LO = $57   ; 343-256 = 87
 PLAYER_MAX_X_HI = 1
 
 ZONE_BLANK_MASK = 2
+
+; ---- Game modes ----
+GAME_PLAY    = 0
+GAME_EXPLODE = 1     ; big screen explosion
+GAME_SPIN    = 2     ; missile-hit spin + freeze
+
+; ---- Spin death tuning ----
+SPIN_STEP_MASK    = 3      ; rotate every 4 frames (0..3)
+SPIN_WAIT_FRAMES  = 60     ; ~1 second at 60Hz
+
 
 TEXT_X0 = 24
 TEXT_Y0 = 50
@@ -121,14 +131,14 @@ PLAYER_HIT_Y_OFF    = 10
 COLLIDE_MISS_X_THR  = 8
 COLLIDE_MISS_Y_THR  = 8
 
-PMISS_HIT_X_OFF    = 18     ; tip of the big missile sprite
+PMISS_HIT_X_OFF    = 12     ; tip of the big missile sprite
 PMISS_HIT_Y_OFF    = 10     ; center-ish
 
 ENEMY_HIT_X_OFF      = 12
 ENEMY_HIT_Y_OFF      = 10
 
-COLLIDE_PMISS_X_THR  = 16
-COLLIDE_PMISS_Y_THR  = 16
+COLLIDE_PMISS_X_THR  = 10
+COLLIDE_PMISS_Y_THR  = 8
 
 
 ; ---- Directions ----
@@ -137,14 +147,14 @@ DIR_UP    = 1
 DIR_DOWN  = 2
 DIR_LEFT  = 3
 
-BULLET_SPEED     = 4
+BULLET_SPEED     = 5
 BULLET_OFF_Y     = 250
 BULLET_OFF_X     = 0
 
 ; ---- Player missile (left-side, post-unlock) ----
 PMISS_START_X_LO = PLAYER_MIN_X_LO
 PMISS_START_X_HI = PLAYER_MIN_X_HI
-PMISS_SPEED      = 4
+PMISS_SPEED      = 5
 PMISS_OFFSCREEN_LO = $68
 PMISS_OFFSCREEN_HI = 1
 
@@ -194,7 +204,7 @@ start:
         sta CIA2
 
         ; screen=$0400, charset=$2000 -> D018 = $18
-        lda #$18
+        lda #$1a
         sta $d018
 
         ; bitmap off
@@ -721,22 +731,38 @@ irq_frame:
         jsr zone_update_chars
 +
 
-        ; shimmer (zone or full-screen explosion)
+        ; shimmer selection
         lda game_mode
-        beq do_zone_shim
-        jsr explosion_shimmer
-        jmp do_update
+        beq do_zone_shim          ; play -> zone shimmer
+        cmp #GAME_EXPLODE
+        beq do_explode_shim       ; explode -> explosion shimmer
+        jmp do_update             ; spin -> no shimmer (frozen)
+
 do_zone_shim:
         jsr zone_shimmer
+        jmp do_update
+
+do_explode_shim:
+        jsr explosion_shimmer
 
 do_update:
         lda game_mode
-        beq do_game
+        beq do_game               ; play
+        cmp #GAME_EXPLODE
+        beq do_explode_update     ; big explosion
+        ; else GAME_SPIN
+        jsr death_spin_update
+        jmp after_update
+
+do_explode_update:
         jsr explosion_update
         jmp after_update
+
 do_game:
         jsr game_update
+
 after_update:
+
 
         lda #1
         sta irq_state
@@ -835,7 +861,6 @@ zuc_done:
         tax
         rts
 
-; ------------------------------------------------------------
 game_update:
         jsr read_joy_move_yar
 
@@ -844,12 +869,14 @@ game_update:
         jsr check_bullet_barrier_hit
         jsr check_pmiss_enemy_hit
 
-
         ; collision: enemy hits player => lose
         jsr check_player_enemy_collision
 
-        ; collision: enemy missile hits player => lose
+        ; collision: enemy missile hits player => spin death
         jsr check_player_missile_collision
+
+        ; NEW: collision: player missile hits player => spin death
+        jsr check_player_pmiss_collision
 
         lda frame_counter
         and #MISSILE_SLOW_MASK
@@ -858,6 +885,7 @@ game_update:
         jsr update_missile
         jsr write_positions
         rts
+
 
 skip_missile:
         jsr write_positions
@@ -958,8 +986,15 @@ update_player_fire:
 
         ; NEW press detected here -----------------
 
+        ; NEW: no firing allowed while inside shimmer zone
+        jsr player_in_zone
+        bcc fire_ok
+        jmp upf_no_new_press
+fire_ok:
+
         lda pmiss_unlocked
         bne upf_fire_pmiss
+
 
         ; ---- fire BULLET (sprite3) if inactive ----
         lda bullet_state
@@ -1410,7 +1445,7 @@ read_joy_move_yar:
 
         lda yar_x
         sec
-        sbc #2
+        sbc #4
         sta yar_x
         bcs +
         dec yar_x_hi
@@ -1424,7 +1459,7 @@ no_left:
 
         lda yar_x
         clc
-        adc #2
+        adc #4
         sta yar_x
         bcc +
         inc yar_x_hi
@@ -1437,7 +1472,7 @@ no_right:
         bne no_up
         lda yar_y
         sec
-        sbc #2
+        sbc #4
         sta yar_y
 no_up:
 
@@ -1447,7 +1482,7 @@ no_up:
         bne no_down
         lda yar_y
         clc
-        adc #2
+        adc #4
         sta yar_y
 no_down:
 
@@ -1911,6 +1946,107 @@ hit_x_off: .byte 0
 hit_y_off: .byte 0
 
 
+; ------------------------------------------------------------
+; Collision: player (sprite0) vs player missile (pmiss / sprite4)
+; Same behavior as enemy missile hit: spin + freeze + restart
+; ------------------------------------------------------------
+check_player_pmiss_collision:
+        lda game_mode
+        beq cppc_continue
+        rts
+cppc_continue:
+
+        lda pmiss_state
+        bne +
+        rts                     ; missile not flying
++
+
+        ; same immunity rule as enemy missile: ignore while in zone
+        jsr player_in_zone
+        bcc +                   ; not in zone -> check collision
+        rts                     ; in zone -> ignore missile damage
++
+
+        ; ---- X collision (16-bit), require same high byte ----
+        ; player hitpoint X
+        lda yar_x
+        clc
+        adc #PLAYER_HIT_X_OFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+
+        ; pmiss hitpoint X
+        lda pmiss_x
+        clc
+        adc #PMISS_HIT_X_OFF
+        sta tmp2_lo
+        lda pmiss_x_hi
+        adc #0
+        sta tmp2_hi
+
+        lda tmp1_hi
+        cmp tmp2_hi
+        bne cppc_done           ; if hi differs, too far apart
+
+        ; abs(tmp1_lo - tmp2_lo) < COLLIDE_PMISS_X_THR ?
+        lda tmp1_lo
+        cmp tmp2_lo
+        beq cppc_y
+        bcc cppc_x_lt
+
+cppc_x_gt:
+        sec
+        sbc tmp2_lo
+        cmp #COLLIDE_PMISS_X_THR
+        bcc cppc_y
+        rts
+
+cppc_x_lt:
+        lda tmp2_lo
+        sec
+        sbc tmp1_lo
+        cmp #COLLIDE_PMISS_X_THR
+        bcc cppc_y
+        rts
+
+cppc_y:
+        ; ---- Y collision (8-bit) ----
+        lda yar_y
+        clc
+        adc #PLAYER_HIT_Y_OFF
+        sta tmp1_lo
+
+        lda pmiss_y
+        clc
+        adc #PMISS_HIT_Y_OFF
+        sta tmp2_lo
+
+        lda tmp1_lo
+        cmp tmp2_lo
+        beq cppc_hit
+        bcc cppc_y_lt
+
+cppc_y_gt:
+        sec
+        sbc tmp2_lo
+        cmp #COLLIDE_PMISS_Y_THR
+        bcc cppc_hit
+        rts
+
+cppc_y_lt:
+        lda tmp2_lo
+        sec
+        sbc tmp1_lo
+        cmp #COLLIDE_PMISS_Y_THR
+        bcc cppc_hit
+        rts
+
+cppc_hit:
+        jsr player_missile_hit
+cppc_done:
+        rts
 
 
 ; ------------------------------------------------------------
@@ -2258,7 +2394,8 @@ mdy_player_lt:
         bcs cpmc_done
 
 hit:
-        jsr player_lose
+        jsr player_missile_hit
+
 
 cpmc_done:
         rts
@@ -2271,6 +2408,95 @@ player_lose:
         sta explode_radius
         sta explode_wait
         rts
+
+; ------------------------------------------------------------
+; Called when enemy missile hits player:
+; spin clockwise until UP, then freeze 1 second, then restart
+; ------------------------------------------------------------
+player_missile_hit:
+        lda #GAME_SPIN
+        sta game_mode
+
+        lda #0
+        sta spin_wait
+
+        lda player_dir
+        cmp #DIR_UP
+        beq pmh_already_up
+
+        lda #0
+        sta spin_phase
+        lda #SPIN_STEP_MASK       ; 3 -> first update rotates immediately
+        sta spin_counter
+        rts
+
+pmh_already_up:
+        ; already facing up: just freeze 1 sec
+        lda #1
+        sta spin_phase
+        lda #SPIN_WAIT_FRAMES
+        sta spin_wait
+
+        lda #SPR0_PTR_UP
+        sta SPR_PTRS+0
+        lda #DIR_UP
+        sta player_dir
+        rts
+
+
+; ------------------------------------------------------------
+; GAME_SPIN update (runs from IRQ, freezes everything else)
+; ------------------------------------------------------------
+death_spin_update:
+        lda spin_phase
+        beq dsu_spin
+
+        ; waiting
+        lda spin_wait
+        beq dsu_restart
+        dec spin_wait
+        jsr write_positions
+        rts
+
+dsu_restart:
+        jsr restart_level
+        rts
+
+dsu_spin:
+        inc spin_counter
+        lda spin_counter
+        and #SPIN_STEP_MASK
+        bne dsu_draw_only
+
+        ; clockwise rotate: RIGHT->DOWN->LEFT->UP->RIGHT...
+        ldx player_dir
+        lda cw_next, x
+        sta player_dir
+        tax
+        lda dir_ptr_tbl, x
+        sta SPR_PTRS+0
+
+        lda player_dir
+        cmp #DIR_UP
+        bne dsu_draw_only
+
+        ; reached UP: freeze 1 sec
+        lda #1
+        sta spin_phase
+        lda #SPIN_WAIT_FRAMES
+        sta spin_wait
+
+dsu_draw_only:
+        jsr write_positions
+        rts
+
+; DIR_RIGHT=0 DIR_UP=1 DIR_DOWN=2 DIR_LEFT=3
+cw_next:
+        .byte DIR_DOWN, DIR_RIGHT, DIR_LEFT, DIR_UP   ; 0->2, 1->0, 2->3, 3->1
+
+dir_ptr_tbl:
+        .byte SPR0_PTR_RIGHT, SPR0_PTR_UP, SPR0_PTR_DOWN, SPR0_PTR_LEFT
+
 
 ; ------------------------------------------------------------
 explosion_update:
@@ -2490,6 +2716,11 @@ old_yar_y:     .byte 0
 
 tmp_row: .byte 0
 
+spin_phase:    .byte 0   ; 0=spinning, 1=waiting
+spin_counter:  .byte 0
+spin_wait:     .byte 0
+
+
 ; ------------------------------------------------------------
 ; sprite_data: 512 bytes copied to $3000
 ; ------------------------------------------------------------
@@ -2565,16 +2796,20 @@ sprite_data:
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; sprite4 NEW player bullet
-        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00,  $00,$00,$00
-        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00,  $00,$00,$00
+; sprite4 player bullet (21 rows * 3 bytes = 63) + 1 pad byte
+        .rept 9
         .byte $00,$00,$00
-        .byte $00,$00,$00
+        .endrept
+
         .byte $00,$18,$00
         .byte $00,$18,$00
+
+        .rept 10
         .byte $00,$00,$00
-        .byte $00,$00,$00
-        .byte $00,$00,$00
-        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00
-        .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00
-        .byte $83
+        .endrept
+
+        .byte $00        ; 64th byte (unused/pad)
+
+        .rept (512 - (5*64))
+        .byte 0
+        .endrept
