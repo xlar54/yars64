@@ -158,6 +158,8 @@ PMISS_SPEED      = 5
 PMISS_OFFSCREEN_LO = $68
 PMISS_OFFSCREEN_HI = 1
 
+BARRIER_BOUNCES_TO_NIBBLE = 6  
+
 ; ----------------------------
 ; Game variables (zero page)
 ; ----------------------------
@@ -1149,8 +1151,10 @@ upf_done:
 ;   checks 8 sample points around player sprite bbox
 ;   Output: C=1 if overlapping wall (10..13), else C=0
 ;   Uses: tmp1_lo/tmp1_hi = X (16-bit), tmp2_lo = Y (8-bit)
+;   NEW: records hit tile in wall_hit_row / wall_hit_col on first hit
 ; ------------------------------------------------------------
 player_overlap_wall:
+
         ; TL
         lda yar_x
         clc
@@ -1164,11 +1168,15 @@ player_overlap_wall:
         adc #PLY_COL_TOP_YOFF
         sta tmp2_lo
         jsr wall_at_point
-        bcc pow_next1
+        bcc +                  ; short branch
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
-pow_next1:
++       jmp pow_next1
 
+pow_next1:
         ; TM
         lda yar_x
         clc
@@ -1182,11 +1190,15 @@ pow_next1:
         adc #PLY_COL_TOP_YOFF
         sta tmp2_lo
         jsr wall_at_point
-        bcc pow_next2
+        bcc +
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
-pow_next2:
++       jmp pow_next2
 
+pow_next2:
         ; TR
         lda yar_x
         clc
@@ -1200,11 +1212,15 @@ pow_next2:
         adc #PLY_COL_TOP_YOFF
         sta tmp2_lo
         jsr wall_at_point
-        bcc pow_next3
+        bcc +
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
-pow_next3:
++       jmp pow_next3
 
+pow_next3:
         ; ML
         lda yar_x
         clc
@@ -1218,11 +1234,15 @@ pow_next3:
         adc #PLY_COL_MID_YOFF
         sta tmp2_lo
         jsr wall_at_point
-        bcc pow_next4
+        bcc +
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
-pow_next4:
++       jmp pow_next4
 
+pow_next4:
         ; MR
         lda yar_x
         clc
@@ -1236,11 +1256,15 @@ pow_next4:
         adc #PLY_COL_MID_YOFF
         sta tmp2_lo
         jsr wall_at_point
-        bcc pow_next5
+        bcc +
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
-pow_next5:
++       jmp pow_next5
 
+pow_next5:
         ; BL
         lda yar_x
         clc
@@ -1254,11 +1278,15 @@ pow_next5:
         adc #PLY_COL_BOT_YOFF
         sta tmp2_lo
         jsr wall_at_point
-        bcc pow_next6
+        bcc +
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
-pow_next6:
++       jmp pow_next6
 
+pow_next6:
         ; BM
         lda yar_x
         clc
@@ -1272,11 +1300,15 @@ pow_next6:
         adc #PLY_COL_BOT_YOFF
         sta tmp2_lo
         jsr wall_at_point
-        bcc pow_next7
+        bcc +
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
-pow_next7:
++       jmp pow_next7
 
+pow_next7:
         ; BR
         lda yar_x
         clc
@@ -1291,12 +1323,16 @@ pow_next7:
         sta tmp2_lo
         jsr wall_at_point
         bcc pow_clear
+        stx wall_hit_row
+        lda tmp1_lo
+        sta wall_hit_col
         sec
         rts
 
 pow_clear:
         clc
         rts
+
 
 ; ------------------------------------------------------------
 ; wall_at_point
@@ -1537,6 +1573,8 @@ clamp_max:
         ; ...then bounce away from the wall a couple pixels
         jsr bounce_from_wall
 
+        jsr barrier_nibble_on_bounce
+
         ; re-clamp X after bounce
         jsr clamp_player_x
 
@@ -1605,6 +1643,75 @@ spr_down:
         lda #DIR_DOWN
         sta player_dir
         rts
+
+; ------------------------------------------------------------
+; barrier_nibble_on_bounce
+; If you bounce on the same barrier tile 3 times, erase it.
+; Uses wall_hit_row / wall_hit_col set by player_overlap_wall.
+; ------------------------------------------------------------
+barrier_nibble_on_bounce:
+        ; only nibble if hit is inside barrier rectangle
+        lda wall_hit_row
+        cmp #BARRIER_ROW
+        bcc bnb_done
+        cmp #(BARRIER_ROW + BARRIER_H)
+        bcs bnb_done
+
+        lda wall_hit_col
+        cmp #BARRIER_COL
+        bcc bnb_done
+        cmp #(BARRIER_COL + BARRIER_W)
+        bcs bnb_done
+
+        ; same tile as last time?
+        lda wall_hit_row
+        cmp nib_last_row
+        bne bnb_new_tile
+        lda wall_hit_col
+        cmp nib_last_col
+        bne bnb_new_tile
+
+        ; same tile -> count++
+        inc nib_count
+        lda nib_count
+        cmp #BARRIER_BOUNCES_TO_NIBBLE
+        bcc bnb_done
+        jmp bnb_erase
+
+bnb_new_tile:
+        lda wall_hit_row
+        sta nib_last_row
+        lda wall_hit_col
+        sta nib_last_col
+        lda #1
+        sta nib_count
+        rts
+
+bnb_erase:
+        ; clear the character at (row,col)
+        lda wall_hit_row
+        jsr row_to_ptr
+        ldy wall_hit_col
+        lda #CH_SPACE
+        sta (dst_lo),y
+
+        ; clear its color too
+        lda wall_hit_row
+        jsr row_to_color_ptr
+        ldy wall_hit_col
+        lda #0
+        sta (dst_lo),y
+
+        ; reset so it doesn't keep nuking adjacent bounces
+        lda #0
+        sta nib_count
+        lda #$ff
+        sta nib_last_row
+        sta nib_last_col
+
+bnb_done:
+        rts
+
 
 ; ------------------------------------------------------------
 update_missile:
@@ -2663,6 +2770,15 @@ tmp1_lo: .byte 0
 tmp1_hi: .byte 0
 tmp2_lo: .byte 0
 tmp2_hi: .byte 0
+
+; --- barrier nibble tracking ---
+wall_hit_row:   .byte 0      ; set by player_overlap_wall (row of tile hit)
+wall_hit_col:   .byte 0      ; set by player_overlap_wall (col of tile hit)
+
+nib_last_row:   .byte $ff
+nib_last_col:   .byte $ff
+nib_count:      .byte 0
+
 
 ; ------------------------------------------------------------
 ; Assets
