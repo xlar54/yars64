@@ -94,6 +94,8 @@ PLAYER_UNLOCK_Y_OFF = 10
 BULLET_HIT_X_OFF    = 12
 BULLET_HIT_Y_OFF    = 10
 
+
+
 ; sprite pointer values (bank 0, sprite data at $3000)
 SPR0_PTR_RIGHT  = $c0
 SPR0_PTR_UP     = $c1
@@ -118,6 +120,16 @@ PLAYER_HIT_Y_OFF    = 10
 
 COLLIDE_MISS_X_THR  = 8
 COLLIDE_MISS_Y_THR  = 8
+
+PMISS_HIT_X_OFF    = 18     ; tip of the big missile sprite
+PMISS_HIT_Y_OFF    = 10     ; center-ish
+
+ENEMY_HIT_X_OFF      = 12
+ENEMY_HIT_Y_OFF      = 10
+
+COLLIDE_PMISS_X_THR  = 16
+COLLIDE_PMISS_Y_THR  = 16
+
 
 ; ---- Directions ----
 DIR_RIGHT = 0
@@ -830,6 +842,8 @@ game_update:
         jsr check_unlock_player_missile
         jsr update_player_fire
         jsr check_bullet_barrier_hit
+        jsr check_pmiss_enemy_hit
+
 
         ; collision: enemy hits player => lose
         jsr check_player_enemy_collision
@@ -1051,7 +1065,7 @@ bullet_reset:
 
 upf_bullet_done:
 
-        ; ---- update player missile motion ----
+                ; ---- update player missile motion ----
         lda pmiss_state
         beq upf_done
 
@@ -1063,6 +1077,12 @@ upf_bullet_done:
         bcc +
         inc pmiss_x_hi
 +
+        ; NEW: if missile hits barrier, make it disappear (same as offscreen)
+        jsr check_pmiss_barrier_hit
+        lda pmiss_state
+        beq upf_done
+
+        ; existing offscreen check
         lda pmiss_x_hi
         cmp #PMISS_OFFSCREEN_HI
         bcc upf_done
@@ -1070,6 +1090,7 @@ upf_bullet_done:
         lda pmiss_x
         cmp #PMISS_OFFSCREEN_LO
         bcc upf_done
+
 
 pmiss_reset:
         lda #0
@@ -1888,6 +1909,198 @@ cbb_done:
 
 hit_x_off: .byte 0
 hit_y_off: .byte 0
+
+
+
+
+; ------------------------------------------------------------
+; Collision: player missile (pmiss / sprite4) vs enemy (sprite1)
+; Triggers the big explosion (same as player_lose)
+; ------------------------------------------------------------
+check_pmiss_enemy_hit:
+        lda game_mode
+        beq +
+        rts
++
+        lda pmiss_state
+        bne +
+        rts                       ; missile not flying
++
+
+        ; pmiss hitpoint (16-bit X)
+        lda pmiss_x
+        clc
+        adc #PMISS_HIT_X_OFF
+        sta tmp1_lo
+        lda pmiss_x_hi
+        adc #0
+        sta tmp1_hi
+
+        ; enemy hitpoint (16-bit X)
+        lda enemy_x_lo
+        clc
+        adc #ENEMY_HIT_X_OFF
+        sta tmp2_lo
+        lda enemy_x_hi
+        adc #0
+        sta tmp2_hi
+
+        ; X hi must match (enemy is fixed, so this is fine)
+        lda tmp1_hi
+        cmp tmp2_hi
+        beq +
+        rts
++
+
+        ; abs(tmp1_lo - tmp2_lo) < COLLIDE_PMISS_X_THR ?
+        lda tmp1_lo
+        cmp tmp2_lo
+        beq cpeh_x_ok
+        bcc cpeh_x_lt
+
+cpeh_x_gt:
+        sec
+        sbc tmp2_lo
+        cmp #COLLIDE_PMISS_X_THR
+        bcc cpeh_y
+        rts
+
+cpeh_x_lt:
+        lda tmp2_lo
+        sec
+        sbc tmp1_lo
+        cmp #COLLIDE_PMISS_X_THR
+        bcc cpeh_y
+        rts
+
+cpeh_x_ok:
+cpeh_y:
+        ; abs((pmiss_y+off) - (enemy_y+off)) < COLLIDE_PMISS_Y_THR ?
+        lda pmiss_y
+        clc
+        adc #PMISS_HIT_Y_OFF
+        sta tmp1_lo
+
+        lda enemy_y_val
+        clc
+        adc #ENEMY_HIT_Y_OFF
+        sta tmp2_lo
+
+        lda tmp1_lo
+        cmp tmp2_lo
+        beq cpeh_hit
+        bcc cpeh_y_lt
+
+cpeh_y_gt:
+        sec
+        sbc tmp2_lo
+        cmp #COLLIDE_PMISS_Y_THR
+        bcc cpeh_hit
+        rts
+
+cpeh_y_lt:
+        lda tmp2_lo
+        sec
+        sbc tmp1_lo
+        cmp #COLLIDE_PMISS_Y_THR
+        bcc cpeh_hit
+        rts
+
+cpeh_hit:
+        ; kill the missile so it doesn't keep flying
+        lda #0
+        sta pmiss_state
+        sta pmiss_unlocked
+
+        jsr player_lose
+        rts
+
+
+; ------------------------------------------------------------
+; Player missile vs Barrier
+; If pmiss sprite enters barrier wall chars (10..13), reset it
+; like the offscreen behavior (also re-locks to bullets).
+; ------------------------------------------------------------
+check_pmiss_barrier_hit:
+        lda pmiss_state
+        beq cph_done
+
+        ; row = (pmiss_y + PMISS_HIT_Y_OFF - TEXT_Y0) / 8
+        lda pmiss_y
+        clc
+        adc #PMISS_HIT_Y_OFF
+        sec
+        sbc #TEXT_Y0
+        bcc cph_done
+        lsr
+        lsr
+        lsr
+        tax
+
+        cpx #BARRIER_ROW
+        bcc cph_done
+        cpx #(BARRIER_ROW + BARRIER_H)
+        bcs cph_done
+
+        ; col = ((pmiss_x:hi + PMISS_HIT_X_OFF - TEXT_X0) / 8)
+        lda pmiss_x
+        clc
+        adc #PMISS_HIT_X_OFF
+        sta tmp1_lo
+        lda pmiss_x_hi
+        adc #0
+        sta tmp1_hi
+
+        sec
+        lda tmp1_lo
+        sbc #TEXT_X0
+        sta tmp1_lo
+        lda tmp1_hi
+        sbc #0
+        sta tmp1_hi
+        bmi cph_done
+
+        ldy #3
+cph_div8:
+        lsr tmp1_hi
+        ror tmp1_lo
+        dey
+        bne cph_div8
+
+        lda tmp1_lo                 ; A = col
+        cmp #BARRIER_COL
+        bcc cph_done
+        cmp #(BARRIER_COL + BARRIER_W)
+        bcs cph_done
+
+        sta tmp2_lo                 ; save col for (dst),y
+
+        txa
+        jsr row_to_ptr
+        ldy tmp2_lo
+        lda (dst_lo),y
+
+        ; wall chars are 10..13
+        cmp #CH_WALL_SOLID
+        bcc cph_done
+        cmp #CH_WALL_DMG3+1
+        bcs cph_done
+
+        ; HIT: reset exactly like pmiss_reset
+        lda #0
+        sta pmiss_state
+        sta pmiss_unlocked
+
+        lda #PMISS_START_X_LO
+        sta pmiss_x
+        lda #PMISS_START_X_HI
+        sta pmiss_x_hi
+        lda yar_y
+        sta pmiss_y
+
+cph_done:
+        rts
+
 
 ; ------------------------------------------------------------
 ; Collision: sprite0 (player) vs sprite1 (enemy)
