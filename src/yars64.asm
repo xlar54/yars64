@@ -1304,6 +1304,69 @@ wap_not:
         rts
 
 ; ------------------------------------------------------------
+; player_in_zone
+;   Uses player hit point to see if player is inside shimmer zone
+;   Output: C=1 if in zone, C=0 if not
+; ------------------------------------------------------------
+player_in_zone:
+        ; --- row from (yar_y + PLAYER_HIT_Y_OFF) ---
+        lda yar_y
+        clc
+        adc #PLAYER_HIT_Y_OFF
+        sec
+        sbc #TEXT_Y0
+        bcc piz_not
+
+        lsr
+        lsr
+        lsr
+        tax                         ; X = row (0..)
+
+        cpx #ZONE_ROW_TOP
+        bcc piz_not
+        cpx #ZONE_ROW_BOTTOM        ; 25
+        bcs piz_not
+
+        ; --- col from 16-bit (yar_x + PLAYER_HIT_X_OFF) ---
+        lda yar_x
+        clc
+        adc #PLAYER_HIT_X_OFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+
+        sec
+        lda tmp1_lo
+        sbc #TEXT_X0
+        sta tmp1_lo
+        lda tmp1_hi
+        sbc #0
+        sta tmp1_hi
+        bmi piz_not
+
+        ldy #3
+piz_div8:
+        lsr tmp1_hi
+        ror tmp1_lo
+        dey
+        bne piz_div8
+
+        lda tmp1_lo                 ; A = col (0..39)
+        cmp #ZONE_COL_L
+        bcc piz_not
+        cmp #(ZONE_COL_R+1)
+        bcs piz_not
+
+        sec
+        rts
+
+piz_not:
+        clc
+        rts
+
+
+; ------------------------------------------------------------
 ; Joystick movement + sprite0 direction swap (RIGHT/UP/DOWN/LEFT)
 ; HARD BLOCK: cannot overlap barrier/wall chars 10..13
 ; ------------------------------------------------------------
@@ -1903,6 +1966,10 @@ check_player_missile_collision:
         jmp cpmc_done
 cpmc_continue:
 
+        jsr player_in_zone
+        bcc +               ; not in zone -> do normal collision
+        jmp cpmc_done        ; in zone -> ignore missile damage
++
         lda yar_x
         clc
         adc #PLAYER_HIT_X_OFF
