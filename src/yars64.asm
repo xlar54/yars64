@@ -850,15 +850,20 @@ skip_missile:
         rts
 
 ; ------------------------------------------------------------
-; Unlock player missile ONLY when player "touches" barrier wall char (10..13)
-; Uses wall_at_point (so mapping matches your collision system), but samples slightly AHEAD
-; of the player's right edge so it can trigger even though you prevent overlap.
+; Unlock player missile when player touches barrier wall char (10..13)
+; Robust: samples 3 points vertically (top/mid/bot) along right edge.
+; FIXED: preserves X sample-index across wall_at_point (which clobbers X)
 ; ------------------------------------------------------------
 check_unlock_player_missile:
         lda pmiss_unlocked
         bne cul_done
 
-        ; sample point: a bit past player's right edge, centered-ish vertically
+        ldx #0
+cul_try:
+        txa
+        pha                     ; save sample index (0..2)
+
+        ; X sample point (a bit past right edge)
         lda yar_x
         clc
         adc #PLAYER_UNLOCK_X_OFF
@@ -867,28 +872,37 @@ check_unlock_player_missile:
         adc #0
         sta tmp1_hi
 
+        ; Y sample point = yar_y + unlock_yoffs[index]
+        pla
+        tay                     ; Y = index
+        tya
+        pha                     ; keep index on stack again
+
         lda yar_y
         clc
-        adc #PLAYER_UNLOCK_Y_OFF
+        adc unlock_yoffs, y
         sta tmp2_lo
 
-        jsr wall_at_point
-        bcc cul_done                 ; not a wall char
+        jsr wall_at_point       ; C=1 if wall, X=row, tmp1_lo=col
+        stx tmp_row             ; save row (since we must restore index)
 
-        ; wall_at_point leaves:
-        ;   X = row
-        ;   tmp1_lo = col
-        ; so restrict unlock to barrier rectangle
-        cpx #BARRIER_ROW
-        bcc cul_done
-        cpx #(BARRIER_ROW + BARRIER_H)
-        bcs cul_done
+        pla
+        tax                     ; restore sample index into X
+
+        bcc cul_next            ; not wall => next sample
+
+        ; constrain to barrier rectangle using tmp_row + tmp1_lo
+        lda tmp_row
+        cmp #BARRIER_ROW
+        bcc cul_next
+        cmp #(BARRIER_ROW + BARRIER_H)
+        bcs cul_next
 
         lda tmp1_lo
         cmp #BARRIER_COL
-        bcc cul_done
+        bcc cul_next
         cmp #(BARRIER_COL + BARRIER_W)
-        bcs cul_done
+        bcs cul_next
 
         ; -------- UNLOCK! --------
         lda #1
@@ -905,6 +919,16 @@ check_unlock_player_missile:
 
 cul_done:
         rts
+
+cul_next:
+        inx
+        cpx #3
+        bne cul_try
+        rts
+
+unlock_yoffs:
+        .byte (PLAYER_UNLOCK_Y_OFF-6), (PLAYER_UNLOCK_Y_OFF), (PLAYER_UNLOCK_Y_OFF+6)
+
 
 ; ------------------------------------------------------------
 update_player_fire:
@@ -1378,13 +1402,27 @@ clamp_max:
         ; ---- HARD collision check AFTER movement ----
         jsr player_overlap_wall
         bcc +                       ; ok, not overlapping
+
+        ; while we are still in the "attempted" (into-wall) position,
+        ; allow unlock to trigger on that contact frame
+        jsr check_unlock_player_missile
+
+        ; revert to old safe position...
         lda old_yar_x
         sta yar_x
         lda old_yar_x_hi
         sta yar_x_hi
         lda old_yar_y
         sta yar_y
+
+        ; ...then bounce away from the wall a couple pixels
+        jsr bounce_from_wall
+
+        ; re-clamp X after bounce
+        jsr clamp_player_x
+
 +
+
 
 ; --- keep parked left-missile glued to player Y ---
         lda pmiss_unlocked
@@ -1489,6 +1527,103 @@ umy_inc:
         inc miss_y
 umy_done:
         rts
+
+; ------------------------------------------------------------
+; bounce_from_wall
+; Bounce opposite the direction the player was trying to move.
+; Priority: right, left, up, down (good enough for diagonals).
+; ------------------------------------------------------------
+bounce_from_wall:
+        ; if pressing RIGHT (bit3=0), bounce LEFT
+        lda joy_state
+        and #%00001000
+        bne bf_not_right
+
+        lda yar_x
+        sec
+        sbc #2
+        sta yar_x
+        bcs bf_done
+        dec yar_x_hi
+        jmp bf_done
+
+bf_not_right:
+        ; if pressing LEFT (bit2=0), bounce RIGHT
+        lda joy_state
+        and #%00000100
+        bne bf_not_left
+
+        lda yar_x
+        clc
+        adc #2
+        sta yar_x
+        bcc bf_done
+        inc yar_x_hi
+        jmp bf_done
+
+bf_not_left:
+        ; if pressing UP (bit0=0), bounce DOWN
+        lda joy_state
+        and #%00000001
+        bne bf_not_up
+
+        lda yar_y
+        clc
+        adc #2
+        sta yar_y
+        jmp bf_done
+
+bf_not_up:
+        ; if pressing DOWN (bit1=0), bounce UP
+        lda joy_state
+        and #%00000010
+        bne bf_done
+
+        lda yar_y
+        sec
+        sbc #2
+        sta yar_y
+
+bf_done:
+        rts
+
+; ------------------------------------------------------------
+; clamp_player_x (reusable)
+; ------------------------------------------------------------
+clamp_player_x:
+        ; clamp X min
+        lda yar_x_hi
+        bpl +
+        lda #PLAYER_MIN_X_HI
+        sta yar_x_hi
+        lda #PLAYER_MIN_X_LO
+        sta yar_x
++
+        lda yar_x_hi
+        bne +
+        lda yar_x
+        cmp #PLAYER_MIN_X_LO
+        bcs +
+        lda #PLAYER_MIN_X_LO
+        sta yar_x
++
+
+        ; clamp X max
+        lda yar_x_hi
+        cmp #PLAYER_MAX_X_HI
+        bcc +
+        bne clamp_max2
+        lda yar_x
+        cmp #PLAYER_MAX_X_LO
+        bcc +
+clamp_max2:
+        lda #PLAYER_MAX_X_HI
+        sta yar_x_hi
+        lda #PLAYER_MAX_X_LO
+        sta yar_x
++
+        rts
+
 
 ; ------------------------------------------------------------
 write_positions:
@@ -2072,6 +2207,8 @@ pmiss_y:         .byte 0
 old_yar_x:     .byte 0
 old_yar_x_hi:  .byte 0
 old_yar_y:     .byte 0
+
+tmp_row: .byte 0
 
 ; ------------------------------------------------------------
 ; sprite_data: 512 bytes copied to $3000
