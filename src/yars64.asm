@@ -114,7 +114,10 @@ SPR0_PTR_LEFT   = $c3
 SPR1_PTR_ALIEN  = $c4
 SPR2_PTR_MISS   = $c5
 SPR3_PTR_SHOT   = $c6
-SPR4_PTR_BULLET = $c7
+SPR4_PTR_BULLET = $c8
+
+SPR1_PTR_ALIEN_DASH = $c7     ; new dash frame (9th sprite at $3000 + 8*64)
+
 
 ; --- Lose/Explosion constants ---
 EXPLODE_MID_ROW      = 12
@@ -139,6 +142,10 @@ ENEMY_HIT_Y_OFF      = 10
 
 COLLIDE_PMISS_X_THR  = 10
 COLLIDE_PMISS_Y_THR  = 8
+
+; ---- Enemy dash attack ----
+ENEMY_DASH_SPEED_X  = 6
+ENEMY_DASH_SPEED_Y  = 3
 
 
 ; ---- Directions ----
@@ -304,6 +311,11 @@ reset_level_vars:
         lda yar_y
         sta pmiss_y
 
+        lda #0
+        sta enemy_state
+        jsr enemy_set_delay
+
+
         rts
 
 ; ------------------------------------------------------------
@@ -350,7 +362,7 @@ copy_sprites:
         lda #>SPR_DST
         sta dst_hi
 
-        lda #2
+        lda #3
         sta pages_left
 
 cs_pages:
@@ -649,14 +661,23 @@ init_sprites:
         and #$01
         sta enemy_x_hi
 
+        ; set VIC high-bit for sprite1 (bit 1 in $d010)
         lda $d010
-        and #%11111101
+        and #%11111101          ; clear bit 1
         ora #(((ENEMY_X >> 8) & 1) << 1)
         sta $d010
 
         lda #ENEMY_Y
         sta $d003
         sta enemy_y_val
+
+        ; after setting enemy_x_lo/enemy_x_hi/enemy_y_val...
+        lda enemy_x_lo
+        sta enemy_home_x_lo
+        lda enemy_x_hi
+        sta enemy_home_x_hi
+        lda enemy_y_val
+        sta enemy_home_y_val
 
         rts
 
@@ -865,6 +886,8 @@ zuc_done:
 
 game_update:
         jsr read_joy_move_yar
+
+        jsr update_enemy_attack 
 
         jsr check_unlock_player_missile
         jsr update_player_fire
@@ -1859,6 +1882,12 @@ write_positions:
         lda yar_y
         sta $d001
 
+        ; sprite1 enemy alien  <--- ADD THIS
+        lda enemy_x_lo
+        sta $d002
+        lda enemy_y_val
+        sta $d003
+
         ; sprite2 enemy missile
         lda miss_x
         sta $d004
@@ -2408,7 +2437,8 @@ dy_cmp:
         cmp #COLLIDE_Y_THRESH
         bcs cpec_done
 dy_ok:
-        jsr player_lose
+        jsr player_missile_hit
+
 
 cpec_done:
         rts
@@ -2515,6 +2545,191 @@ player_lose:
         sta explode_radius
         sta explode_wait
         rts
+
+; ------------------------------------------------------------
+; enemy_set_delay
+; Random-ish delay (128..255 frames) before next dash
+; ------------------------------------------------------------
+enemy_set_delay:
+        lda $dc04        ; CIA1 Timer A low (changes constantly)
+        eor $dc05        ; mix with high
+        and #$7f
+        ora #$80         ; 128..255
+        sta enemy_timer
+        rts
+
+
+; ------------------------------------------------------------
+; update_enemy_attack
+; Enemy (sprite1) occasionally dashes in a straight line aimed
+; at the player's position at dash start. When offscreen, snaps home.
+; ------------------------------------------------------------
+update_enemy_attack:
+        lda game_mode
+        beq +
+        rts
++
+        lda enemy_state
+        beq uea_idle
+        jmp uea_dash
+
+uea_idle:
+        lda enemy_timer
+        beq uea_start
+        dec enemy_timer
+        rts
+
+uea_start:
+        ; ---- choose X direction toward player ----
+        lda yar_x_hi
+        cmp enemy_x_hi
+        bne uea_x_hi_diff
+        lda yar_x
+        cmp enemy_x_lo
+        bcc uea_x_left
+        jmp uea_x_right
+
+uea_x_hi_diff:
+        bcc uea_x_left
+        jmp uea_x_right
+
+uea_x_right:
+        lda #0
+        sta enemy_dx_neg
+        lda #ENEMY_DASH_SPEED_X
+        sta enemy_dx_mag
+        jmp uea_y_dir
+
+uea_x_left:
+        lda #1
+        sta enemy_dx_neg
+        lda #ENEMY_DASH_SPEED_X
+        sta enemy_dx_mag
+
+uea_y_dir:
+        ; ---- choose Y direction toward player ----
+        lda yar_y
+        cmp enemy_y_val
+        bcc uea_y_up
+        beq uea_y_none
+
+uea_y_down:
+        lda #0
+        sta enemy_dy_neg
+        lda #ENEMY_DASH_SPEED_Y
+        sta enemy_dy_mag
+        jmp uea_go
+
+uea_y_up:
+        lda #1
+        sta enemy_dy_neg
+        lda #ENEMY_DASH_SPEED_Y
+        sta enemy_dy_mag
+        jmp uea_go
+
+uea_y_none:
+        lda #0
+        sta enemy_dy_mag
+        sta enemy_dy_neg
+
+uea_go:
+        lda #1
+        sta enemy_state
+        lda #SPR1_PTR_ALIEN_DASH
+        sta SPR_PTRS+1
+
+        rts
+
+
+uea_dash:
+        ; ---- move X ----
+        lda enemy_dx_mag
+        beq uea_dash_y
+        lda enemy_dx_neg
+        beq uea_x_add
+
+uea_x_sub:
+        lda enemy_x_lo
+        sec
+        sbc enemy_dx_mag
+        sta enemy_x_lo
+        lda enemy_x_hi
+        sbc #0
+        sta enemy_x_hi
+        jmp uea_dash_y
+
+uea_x_add:
+        lda enemy_x_lo
+        clc
+        adc enemy_dx_mag
+        sta enemy_x_lo
+        lda enemy_x_hi
+        adc #0
+        sta enemy_x_hi
+
+uea_dash_y:
+        ; ---- move Y ----
+        lda enemy_dy_mag
+        beq uea_offcheck
+        lda enemy_dy_neg
+        beq uea_y_add
+
+uea_y_sub:
+        lda enemy_y_val
+        sec
+        sbc enemy_dy_mag
+        sta enemy_y_val
+        jmp uea_offcheck
+
+uea_y_add:
+        lda enemy_y_val
+        clc
+        adc enemy_dy_mag
+        sta enemy_y_val
+
+uea_offcheck:
+        ; ---- RIGHT offscreen (9-bit sprite X) ----
+        ; if (enemy_x_hi == 1) and (enemy_x_lo >= SHOT_OFFSCREEN_LO) => reset
+        lda enemy_x_hi
+        and #$01
+        cmp #SHOT_OFFSCREEN_HI      ; should be 1
+        bne uea_left_check
+        lda enemy_x_lo
+        cmp #SHOT_OFFSCREEN_LO      ; $68 (360)
+        bcs uea_reset_home
+
+uea_left_check:
+        ; ---- LEFT offscreen: if hi underflowed (negative) ----
+        lda enemy_x_hi
+        bmi uea_reset_home
+
+        ; (optional) Y bounds reset too (keeps it from disappearing forever)
+        lda enemy_y_val
+        cmp #10
+        bcc uea_reset_home
+        cmp #245
+        bcs uea_reset_home
+
+        rts
+
+
+uea_reset_home:
+        lda #0
+        sta enemy_state
+
+        lda enemy_home_x_lo
+        sta enemy_x_lo
+        lda enemy_home_x_hi
+        sta enemy_x_hi
+        lda enemy_home_y_val
+        sta enemy_y_val
+
+        lda #SPR1_PTR_ALIEN
+        sta SPR_PTRS+1
+
+        jsr enemy_set_delay
+        rts
+
 
 ; ------------------------------------------------------------
 ; Called when enemy missile hits player:
@@ -2780,6 +2995,19 @@ nib_last_col:   .byte $ff
 nib_count:      .byte 0
 
 
+; ---- enemy dash state ----
+enemy_state:       .byte 0     ; 0=home/idle, 1=dashing
+enemy_timer:       .byte 0     ; idle countdown
+enemy_dx_mag:      .byte 0
+enemy_dx_neg:      .byte 0     ; 0=+, 1=-
+enemy_dy_mag:      .byte 0
+enemy_dy_neg:      .byte 0     ; 0=+, 1=-
+
+enemy_home_x_lo:   .byte 0
+enemy_home_x_hi:   .byte 0
+enemy_home_y_val:  .byte 0
+
+
 ; ------------------------------------------------------------
 ; Assets
 ; ------------------------------------------------------------
@@ -2912,6 +3140,16 @@ sprite_data:
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
+; sprite1 DASH (new frame)
+        .byte $0a,$00,$00,$20,$a0,$00,$00,$20
+        .byte $00,$28,$20,$00,$22,$a0,$00,$82
+        .byte $82,$00,$82,$82,$00,$82,$82,$00
+        .byte $0a,$88,$00,$08,$28,$00,$08,$00
+        .byte $00,$0a,$08,$00,$00,$a0,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$83
+
 ; sprite4 player bullet (21 rows * 3 bytes = 63) + 1 pad byte
         .rept 9
         .byte $00,$00,$00
@@ -2926,6 +3164,8 @@ sprite_data:
 
         .byte $00        ; 64th byte (unused/pad)
 
-        .rept (512 - (5*64))
+        .rept (768 - (9*64))
         .byte 0
         .endrept
+
+
