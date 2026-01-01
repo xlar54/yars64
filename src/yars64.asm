@@ -78,6 +78,8 @@ ZONE_BLANK_MASK = 2
 GAME_PLAY    = 0
 GAME_EXPLODE = 1     ; big screen explosion
 GAME_SPIN    = 2     ; missile-hit spin + freeze
+GAME_TITLE   = 3
+
 
 ; ---- Spin death tuning ----
 SPIN_STEP_MASK    = 3      ; rotate every 4 frames (0..3)
@@ -167,6 +169,47 @@ PMISS_OFFSCREEN_HI = 1
 
 BARRIER_BOUNCES_TO_NIBBLE = 6  
 
+SID = $d400
+
+; Voice 1 regs ($d400..$d406)
+V1_FREQ_LO = SID+$00
+V1_FREQ_HI = SID+$01
+V1_PW_LO   = SID+$02
+V1_PW_HI   = SID+$03
+V1_CTRL    = SID+$04
+V1_AD      = SID+$05
+V1_SR      = SID+$06
+
+
+; Voice 2 regs ($d407..$d40d)
+V2_FREQ_LO = SID+$07
+V2_FREQ_HI = SID+$08
+V2_PW_LO   = SID+$09
+V2_PW_HI   = SID+$0a
+V2_CTRL    = SID+$0b
+V2_AD      = SID+$0c
+V2_SR      = SID+$0d
+
+V3_FREQ_LO = SID+$0e
+V3_FREQ_HI = SID+$0f
+V3_PW_LO   = SID+$10
+V3_PW_HI   = SID+$11
+V3_CTRL    = SID+$12
+V3_AD      = SID+$13
+V3_SR      = SID+$14
+
+SID_FC_LO  = SID+$15
+SID_FC_HI  = SID+$16
+SID_RESFLT = SID+$17
+SID_MODEVOL= SID+$18
+
+GATE  = $01
+TRI   = $10
+NOISE = $80
+PULSE = $40
+
+
+
 ; ----------------------------
 ; Game variables (zero page)
 ; ----------------------------
@@ -239,15 +282,316 @@ start:
         jsr copy_charset
         jsr copy_sprites
 
-        jsr clear_screen
-        jsr draw_zone_and_wall
-        jsr draw_barrier
-        jsr init_sprites
+        jsr sound_init
+
+        ; install IRQ (it enables interrupts inside; we'll re-SEI briefly)
         jsr init_irq
+        sei
+
+        ; show title screen (sprites off, ROM charset)
+        jsr draw_title_screen
 
         cli
+
 mainloop:
+        lda game_mode
+        cmp #GAME_TITLE
+        bne mainloop
+        jsr title_poll_fire
         jmp mainloop
+
+draw_title_screen:
+        lda #GAME_TITLE
+        sta game_mode
+
+        ; use ROM charset at $1000 (uppercase/graphics)
+        ; screen at $0400 => $10, charset $1000 => $04, total $14
+        lda #$14
+        sta $d018
+
+        ; sprites OFF
+        lda #0
+        sta $d015
+
+        jsr clear_screen
+
+        ; --- "YARS REVENGE" (white) ---
+        lda #1
+        sta title_color
+
+        lda #<str_title
+        sta src_lo
+        lda #>str_title
+        sta src_hi
+        lda #11                 ; row
+        ldx #13                 ; col ((40-12)/2)
+        jsr put_line
+
+        ; --- "BY SCOTT HUTTER AND CHATGPT" (white) ---
+        lda #<str_byline
+        sta src_lo
+        lda #>str_byline
+        sta src_hi
+        lda #13                 ; row (skip one line)
+        ldx #6                  ; col ((40-27)/2)
+        jsr put_line
+
+        ; --- "JOYSTICK 2 - FIRE TO BEGIN" (red) ---
+        lda #2                  ; red
+        sta title_color
+
+        lda #<str_press
+        sta src_lo
+        lda #>str_press
+        sta src_hi
+        lda #16                 ; row (two lines below byline)
+        ldx #6
+        jsr put_line
+
+        ; ensure title fire edge starts "not pressed"
+        lda #$10
+        sta fire_prev
+
+        rts
+
+title_poll_fire:
+        lda JOY2
+        and #$10
+        tax                     ; X = $10 not pressed, 0 pressed
+
+        lda fire_prev
+        beq tp_prev_pressed     ; prev was pressed
+
+        cpx #0
+        bne tp_store            ; still not pressed
+
+        ; NEW press -> start game
+        jsr title_start_game
+        jmp tp_store
+
+tp_prev_pressed:
+        ; if still pressed, do nothing
+
+tp_store:
+        txa
+        sta fire_prev
+        rts
+
+title_start_game:
+        ; switch back to your game charset at $2800 ($d018=$1a)
+        lda #$1a
+        sta $d018
+
+        jsr restart_level       ; resets vars, draws playfield, inits sprites
+
+        ; restart_level already sets game_mode to play via reset_level_vars
+        rts
+
+
+put_line:
+        sta tmp_row          ; (already exists in your program)
+        stx title_col
+
+        ; --- write characters to SCREEN ---
+        lda tmp_row
+        jsr row_to_ptr
+
+        clc
+        lda dst_lo
+        adc title_col
+        sta dst_lo
+        bcc +
+        inc dst_hi
++
+
+        ldy #0
+pl_char_loop:
+        lda (src_lo),y
+        beq pl_chars_done
+
+        ; convert 'A'..'Z' to screen codes 1..26
+        cmp #$41
+        bcc pl_store
+        cmp #$5B
+        bcs pl_store
+        and #$1f
+
+pl_store:
+        sta (dst_lo),y
+        iny
+        bne pl_char_loop
+
+pl_chars_done:
+        tya
+        tax                     ; X = length
+
+        ; --- write colors to COLORRAM ---
+        lda tmp_row
+        jsr row_to_color_ptr
+
+        clc
+        lda dst_lo
+        adc title_col
+        sta dst_lo
+        bcc +
+        inc dst_hi
++
+
+        ldy #0
+        lda title_color
+        cpx #0
+        beq pl_done
+
+pl_col_loop:
+        sta (dst_lo),y
+        iny
+        dex
+        bne pl_col_loop
+
+pl_done:
+        rts
+
+BUZZ_LEN = 3        ; how long the bzzzt lasts (0..15). try 2..4
+
+sound_update:
+        ; only during GAME_PLAY
+        lda game_mode
+        cmp #GAME_PLAY
+        beq su_play
+
+        ; not playing: silence voices (gate off)
+        lda #0
+        sta V1_CTRL
+        sta V2_CTRL
+        sta V3_CTRL
+        lda #0
+        sta buzz_on
+        sta pew_timer
+        rts
+
+
+su_play:
+        ; --- ensure hum is ON (in case anything else killed it) ---
+        lda V3_CTRL
+        and #GATE
+        bne hum_ok
+        lda #(TRI|GATE)
+        sta V3_CTRL
+hum_ok:
+
+        ; desired buzz window: (frame_counter & $0f) < BUZZ_LEN
+        lda frame_counter
+        and #$0f
+        cmp #BUZZ_LEN
+        bcc want_buzz
+
+want_no_buzz:
+        lda buzz_on
+        beq su_done
+        lda #0
+        sta V2_CTRL          ; gate off
+        lda #0
+        sta buzz_on
+        rts
+
+want_buzz:
+        lda buzz_on
+        bne buzz_live
+
+        ; --- start buzz (Voice 2 pulse) ---
+        lda #0
+        sta V2_CTRL
+
+        lda #$00
+        sta V2_PW_LO
+        lda #$08
+        sta V2_PW_HI          ; narrow-ish pulse
+
+        lda #$00
+        sta V2_FREQ_LO
+        lda #$0c
+        sta V2_FREQ_HI        ; LOWER buzz pitch (try $09..$0f)
+
+        lda #$c0
+        sta V2_AD             ; fast attack
+        lda #$01
+        sta V2_SR             ; loud sustain
+
+        lda #(PULSE|GATE)
+        sta V2_CTRL
+
+        lda #1
+        sta buzz_on
+        rts
+
+buzz_live:
+        ; tiny wobble so it feels “electrical” without being high
+        lda frame_counter
+        and #1
+        beq buzz_a
+buzz_b:
+        lda #$0d
+        sta V2_FREQ_HI
+        rts
+buzz_a:
+        lda #$0b
+        sta V2_FREQ_HI
+        rts
+
+su_done:
+
+                ; ---- PEW update (Voice 1) ----
+        lda pew_timer
+        beq pew_done
+
+        ; index = pew_timer-1 (0..PEW_LEN-1)
+        sec
+        sbc #1
+        tax
+
+        lda #$00
+        sta V1_FREQ_LO
+        lda pew_freq_hi_tbl, x
+        sta V1_FREQ_HI
+
+        dec pew_timer
+        bne pew_done
+
+        ; timer hit 0 -> gate off
+        lda #0
+        sta V1_CTRL
+
+pew_done:
+        rts
+
+
+pew_start:
+        ; restart the pew every time you fire
+        lda #PEW_LEN
+        sta pew_timer
+
+        ; pulse width (about 50%)
+        lda #$00
+        sta V1_PW_LO
+        lda #$08
+        sta V1_PW_HI
+
+        ; fast envelope (short blip)
+        lda #$02        ; A=0, D=2
+        sta V1_AD
+        lda #$02        ; S=0, R=2
+        sta V1_SR
+
+        ; start at first pitch (table[0])
+        lda #$00
+        sta V1_FREQ_LO
+        lda pew_freq_hi_tbl
+        sta V1_FREQ_HI
+
+        lda #(PULSE|GATE)
+        sta V1_CTRL
+        rts
+
 
 ; ------------------------------------------------------------
 ; Reset gameplay vars
@@ -400,6 +744,91 @@ cs2:
         inx
         bne cs2
         rts
+
+sound_init:
+        lda #12
+        sta SID_MODEVOL
+
+        ; ---- Voice 1: PEW off initially ----
+        lda #0
+        sta V1_CTRL
+        lda #0
+        sta pew_timer
+
+
+        ; ---- Voice 3: constant HUM (triangle) ----
+        lda #0
+        sta V3_CTRL
+
+        lda #$00
+        sta V3_FREQ_LO
+        lda #$06          ; hum pitch (raise to $07 if you want)
+        sta V3_FREQ_HI
+
+        lda #$22
+        sta V3_AD
+        lda #$56          ; a little stronger sustain than before
+        sta V3_SR
+
+        lda #(TRI|GATE)
+        sta V3_CTRL
+
+        ; ---- Voice 2: BUZZ off initially ----
+        lda #0
+        sta V2_CTRL
+        lda #0
+        sta buzz_on
+
+        rts
+
+
+
+
+hum_start:
+        lda hum_state
+        bne hs_done
+
+        ; Voice 3: triangle + gate
+        ; Frequency word: tweak to taste (lower = deeper)
+        lda #$00
+        sta V3_FREQ_LO
+        lda #$07
+        sta V3_FREQ_HI
+
+        ; Pulse width not used for triangle, but set anyway
+        lda #$00
+        sta V3_PW_LO
+        lda #$08
+        sta V3_PW_HI
+
+        ; ADSR: slow-ish attack, no decay, low sustain, gentle release
+        lda #$24          ; A=2, D=4
+        sta V3_AD
+        lda #$68          ; S=6, R=8
+        sta V3_SR
+
+        lda #$11          ; %00010001 = TRIANGLE($10) + GATE($01)
+        sta V3_CTRL
+
+        lda #1
+        sta hum_state
+hs_done:
+        rts
+
+
+hum_stop:
+        lda hum_state
+        beq hst_done
+
+        ; clear GATE (leave waveform bit alone or clear all)
+        lda #$10          ; triangle, gate off
+        sta V3_CTRL
+
+        lda #0
+        sta hum_state
+hst_done:
+        rts
+
 
 ; ------------------------------------------------------------
 ; Thick "<" barrier (hollow wedge)
@@ -769,11 +1198,17 @@ do_explode_shim:
         jsr explosion_shimmer
 
 do_update:
+
         lda game_mode
         beq do_game               ; play
         cmp #GAME_EXPLODE
         beq do_explode_update     ; big explosion
-        ; else GAME_SPIN
+        cmp #GAME_SPIN
+        beq do_spin_update        ; spin death
+        ; else GAME_TITLE (or anything else)
+        jmp after_update
+
+do_spin_update:
         jsr death_spin_update
         jmp after_update
 
@@ -785,7 +1220,7 @@ do_game:
         jsr game_update
 
 after_update:
-
+        jsr sound_update
 
         lda #1
         sta irq_state
@@ -1030,6 +1465,8 @@ fire_ok:
         lda player_dir
         sta bullet_dir
 
+        jsr pew_start
+
         lda yar_x
         sta bullet_x
         lda yar_x_hi
@@ -1037,6 +1474,7 @@ fire_ok:
         lda yar_y
         sta bullet_y
         jmp upf_no_new_press
+
 
 upf_fire_pmiss:
         ; ---- fire LEFT MISSILE (sprite4) if parked ----
@@ -3063,6 +3501,32 @@ tmp_row: .byte 0
 spin_phase:    .byte 0   ; 0=spinning, 1=waiting
 spin_counter:  .byte 0
 spin_wait:     .byte 0
+
+tmp_col:    .byte 0
+tmp_color:  .byte 0
+
+title_col:   .byte 0
+title_color: .byte 0
+
+str_title:  .text "yars revenge"
+            .byte 0
+
+str_byline: .text "by scott hutter and chatgpt"
+            .byte 0
+
+str_press:  .text "joystick 2 - fire to begin"
+            .byte 0
+
+hum_state: .byte 0     ; 0=off, 1=on
+sound_mode: .byte $ff    ; $ff=unknown, 0=hum, 1=buzz
+buzz_on: .byte 0    ; 0=off, 1=on
+
+pew_timer: .byte 0     ; counts down frames remaining in pew
+
+; simple downward sweep (hi byte only). tweak values to taste.
+PEW_LEN = 6
+pew_freq_hi_tbl:
+        .byte $28,$24,$20,$1c,$18,$14
 
 
 ; ------------------------------------------------------------
