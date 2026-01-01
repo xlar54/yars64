@@ -52,17 +52,16 @@ CH_WALL_DMG1    = 11
 CH_WALL_DMG2    = 12
 CH_WALL_DMG3    = 13
 
-MISSILE_SLOW_MASK = 2    ; update once every 8 frames (7 = slower, 3 = medium)
+MISSILE_SLOW_MASK = 2
 
 SHOT_START_X     = 24
-SHOT_SPEED       = 4          ; pixels per update (try 2 or 4)
-SHOT_OFFSCREEN_X = 252
+SHOT_SPEED       = 4
 SHOT_OFFSCREEN_LO = $68    ; 360 = $0168
 SHOT_OFFSCREEN_HI = 1
 
 BARRIER_ROW   = 5
 BARRIER_COL   = 29
-BARRIER_COLOR = 2          ; red
+BARRIER_COLOR = 2
 
 BARRIER_H      = 12
 BARRIER_W      = 10
@@ -73,46 +72,66 @@ PLAYER_MIN_X_HI = 0
 PLAYER_MAX_X_LO = $57   ; 343-256 = 87
 PLAYER_MAX_X_HI = 1
 
-ZONE_BLANK_MASK = 2   ; 0=toggle every frame, 1=every 2 frames, 3=every 4, 7=every 8...
+ZONE_BLANK_MASK = 2
+
+TEXT_X0 = 24
+TEXT_Y0 = 50
+
+; ----- Player vs barrier collision sampling offsets -----
+PLY_COL_L_XOFF   = 2
+PLY_COL_R_XOFF   = 23      ; lets you get 1-2 px closer before blocking
+PLY_COL_MID_XOFF = 12
+
+PLY_COL_TOP_YOFF = 3
+PLY_COL_MID_YOFF = 10
+PLY_COL_BOT_YOFF = 18
+
+; ----- Unlock sample (touch point on player sprite) -----
+; Sample a little ahead of the player's right edge so it can "touch" while still blocked from overlapping.
+PLAYER_UNLOCK_X_OFF = (PLY_COL_R_XOFF + 2)   ; 23+2 = 25
+PLAYER_UNLOCK_Y_OFF = 10
+
+BULLET_HIT_X_OFF    = 12
+BULLET_HIT_Y_OFF    = 10
 
 ; sprite pointer values (bank 0, sprite data at $3000)
-SPR0_PTR_RIGHT  = $c0   ; $3000
-SPR0_PTR_UP     = $c1   ; $3040
-SPR0_PTR_DOWN   = $c2   ; $3080
-SPR0_PTR_LEFT   = $c3   ; $30c0
-SPR1_PTR_ALIEN  = $c4   ; $3100
-SPR2_PTR_MISS   = $c5   ; $3140  (SMALL sprite data)  enemy missile
-SPR3_PTR_SHOT   = $c6   ; $3180  (LARGE sprite data)  enemy/player missile
-SPR4_PTR_BULLET = $c7   ; $31c0  (NEW sprite data)    player bullet
+SPR0_PTR_RIGHT  = $c0
+SPR0_PTR_UP     = $c1
+SPR0_PTR_DOWN   = $c2
+SPR0_PTR_LEFT   = $c3
+SPR1_PTR_ALIEN  = $c4
+SPR2_PTR_MISS   = $c5
+SPR3_PTR_SHOT   = $c6
+SPR4_PTR_BULLET = $c7
 
 ; --- Lose/Explosion constants ---
 EXPLODE_MID_ROW      = 12
-EXPLODE_MAX_RADIUS   = 12          ; covers rows 0..24 from mid
-EXPLODE_WAIT_FRAMES  = 45         ; ~2 seconds @ 60Hz
-COLLIDE_X_THRESH     = 24          ; pixels
-COLLIDE_Y_THRESH     = 21          ; pixels
+EXPLODE_MAX_RADIUS   = 12
+EXPLODE_WAIT_FRAMES  = 45
+COLLIDE_X_THRESH     = 24
+COLLIDE_Y_THRESH     = 21
 
-MISS_HIT_X_OFF      = 12     ; center of sprite box
+MISS_HIT_X_OFF      = 12
 MISS_HIT_Y_OFF      = 10
 PLAYER_HIT_X_OFF    = 12
 PLAYER_HIT_Y_OFF    = 10
 
-COLLIDE_MISS_X_THR  = 8     ; tune these (smaller = stricter)
+COLLIDE_MISS_X_THR  = 8
 COLLIDE_MISS_Y_THR  = 8
 
-; ---- Player bullets (pre-unlock) ----
+; ---- Directions ----
 DIR_RIGHT = 0
 DIR_UP    = 1
 DIR_DOWN  = 2
 DIR_LEFT  = 3
 
 BULLET_SPEED     = 4
-BULLET_OFF_Y     = 250      ; park offscreen-ish
+BULLET_OFF_Y     = 250
 BULLET_OFF_X     = 0
 
 ; ---- Player missile (left-side, post-unlock) ----
-PMISS_START_X_LO = PLAYER_MIN_X_LO   ; 24
-PMISS_START_X_HI = PLAYER_MIN_X_HI   ; 0
+PMISS_START_X_LO = PLAYER_MIN_X_LO
+PMISS_START_X_HI = PLAYER_MIN_X_HI
 PMISS_SPEED      = 4
 PMISS_OFFSCREEN_LO = $68
 PMISS_OFFSCREEN_HI = 1
@@ -128,10 +147,10 @@ miss_y  = $f3
 shot_x   = $f7
 shot_y   = $f8
 
-shot_state  = $f9     ; 0=ready, 1=flying
-fire_prev   = $fa     ; previous fire bit (0 pressed, 1 released)
+shot_state  = $f9
+fire_prev   = $fa
 
-joy_state   = $ef     ; temp joystick cache
+joy_state   = $ef
 
 ; pointers must be ZP for (zp),y
 src_lo      = $fb
@@ -200,7 +219,7 @@ mainloop:
         jmp mainloop
 
 ; ------------------------------------------------------------
-; Reset gameplay vars (no screen drawing, no IRQ install)
+; Reset gameplay vars
 ; ------------------------------------------------------------
 reset_level_vars:
         lda #80
@@ -239,7 +258,6 @@ reset_level_vars:
         sta explode_radius
         sta explode_wait
 
-        ; direction setup and bullet state
         lda #DIR_RIGHT
         sta player_dir
 
@@ -348,8 +366,7 @@ cs2:
         rts
 
 ; ------------------------------------------------------------
-; Thick "<" barrier (hollow wedge), open to the LEFT side,
-; flat nose (not pointy), 2-char thick border.
+; Thick "<" barrier (hollow wedge)
 ; ------------------------------------------------------------
 draw_barrier:
         ldx #0
@@ -374,7 +391,6 @@ db_row:
         bcc db_horiz
 
         lda #BARRIER_H - BARRIER_THICK
-        cmp #0
         cpx #(BARRIER_H - BARRIER_THICK)
         bcs db_horiz
 
@@ -481,9 +497,9 @@ zone_chars: .byte CH_ZONE_A, CH_ZONE_B, CH_ZONE_C, CH_ZONE_B
 ; Input: A=row (0..24)
 ; ------------------------------------------------------------
 fill_row_zone_full:
-        pha                 ; save row
-        jsr row_to_ptr      ; uses A=row
-        pla                 ; restore row
+        pha
+        jsr row_to_ptr
+        pla
 
         ldy #0
         ldx #0
@@ -539,11 +555,11 @@ init_sprites:
         lda #SPR2_PTR_MISS
         sta SPR_PTRS+2
 
-        ; sprite3 = player bullet (NEW sprite)
+        ; sprite3 = player bullet
         lda #SPR4_PTR_BULLET
         sta SPR_PTRS+3
 
-        ; sprite4 = player missile (LARGE sprite)
+        ; sprite4 = player missile (LARGE)
         lda #SPR3_PTR_SHOT
         sta SPR_PTRS+4
 
@@ -567,19 +583,15 @@ init_sprites:
 
         ; per-sprite colors
         lda #1
-        sta $d027        ; sprite0 player white
-
+        sta $d027
         lda #13
-        sta $d028        ; sprite1 alien light green
-
+        sta $d028
         lda #13
-        sta $d029        ; sprite2 enemy missile light green
-
+        sta $d029
         lda #1
-        sta $d02a        ; sprite3 player bullet white
-
+        sta $d02a
         lda #1
-        sta $d02b        ; sprite4 player missile white
+        sta $d02b
 
         ; positions
         lda yar_x
@@ -817,6 +829,7 @@ game_update:
 
         jsr check_unlock_player_missile
         jsr update_player_fire
+        jsr check_bullet_barrier_hit
 
         ; collision: enemy hits player => lose
         jsr check_player_enemy_collision
@@ -836,55 +849,48 @@ skip_missile:
         jsr write_positions
         rts
 
+; ------------------------------------------------------------
+; Unlock player missile ONLY when player "touches" barrier wall char (10..13)
+; Uses wall_at_point (so mapping matches your collision system), but samples slightly AHEAD
+; of the player's right edge so it can trigger even though you prevent overlap.
+; ------------------------------------------------------------
 check_unlock_player_missile:
         lda pmiss_unlocked
         bne cul_done
 
-        ; row = (yar_y + PLAYER_HIT_Y_OFF) / 8
-        lda yar_y
-        clc
-        adc #PLAYER_HIT_Y_OFF
-        lsr
-        lsr
-        lsr
-        tax                     ; X=row (0..24-ish)
-
-        ; col = (yar_x + PLAYER_HIT_X_OFF) / 8  (handles hi bit => +32 cols)
+        ; sample point: a bit past player's right edge, centered-ish vertically
         lda yar_x
         clc
-        adc #PLAYER_HIT_X_OFF
+        adc #PLAYER_UNLOCK_X_OFF
         sta tmp1_lo
         lda yar_x_hi
         adc #0
         sta tmp1_hi
 
-        lda tmp1_lo
-        lsr
-        lsr
-        lsr
-        sta tmp2_lo             ; tmp2_lo = col base
-
-        lda tmp1_hi
-        beq cul_col_ok
+        lda yar_y
         clc
-        lda tmp2_lo
-        adc #32
+        adc #PLAYER_UNLOCK_Y_OFF
         sta tmp2_lo
-cul_col_ok:
 
-        ; read screen char at (row,col)
-        txa
-        jsr row_to_ptr
-        ldy tmp2_lo
-        lda (dst_lo),y
+        jsr wall_at_point
+        bcc cul_done                 ; not a wall char
 
-        ; wall chars are 10..13
-        cmp #CH_WALL_SOLID
+        ; wall_at_point leaves:
+        ;   X = row
+        ;   tmp1_lo = col
+        ; so restrict unlock to barrier rectangle
+        cpx #BARRIER_ROW
         bcc cul_done
-        cmp #CH_WALL_DMG3+1
+        cpx #(BARRIER_ROW + BARRIER_H)
         bcs cul_done
 
-        ; UNLOCK!
+        lda tmp1_lo
+        cmp #BARRIER_COL
+        bcc cul_done
+        cmp #(BARRIER_COL + BARRIER_W)
+        bcs cul_done
+
+        ; -------- UNLOCK! --------
         lda #1
         sta pmiss_unlocked
         lda #0
@@ -900,6 +906,7 @@ cul_col_ok:
 cul_done:
         rts
 
+; ------------------------------------------------------------
 update_player_fire:
         ; edge-detect fire
         lda JOY2
@@ -1047,7 +1054,6 @@ pmiss_reset:
         ; disable / re-lock the player missile so we go back to bullets
         sta pmiss_unlocked
 
-        ; (optional) park values (not required since it's hidden now)
         lda #PMISS_START_X_LO
         sta pmiss_x
         lda #PMISS_START_X_HI
@@ -1058,14 +1064,236 @@ pmiss_reset:
 upf_done:
         rts
 
+; ------------------------------------------------------------
+; player_overlap_wall
+;   checks 8 sample points around player sprite bbox
+;   Output: C=1 if overlapping wall (10..13), else C=0
+;   Uses: tmp1_lo/tmp1_hi = X (16-bit), tmp2_lo = Y (8-bit)
+; ------------------------------------------------------------
+player_overlap_wall:
+        ; TL
+        lda yar_x
+        clc
+        adc #PLY_COL_L_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_TOP_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_next1
+        sec
+        rts
+pow_next1:
+
+        ; TM
+        lda yar_x
+        clc
+        adc #PLY_COL_MID_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_TOP_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_next2
+        sec
+        rts
+pow_next2:
+
+        ; TR
+        lda yar_x
+        clc
+        adc #PLY_COL_R_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_TOP_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_next3
+        sec
+        rts
+pow_next3:
+
+        ; ML
+        lda yar_x
+        clc
+        adc #PLY_COL_L_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_MID_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_next4
+        sec
+        rts
+pow_next4:
+
+        ; MR
+        lda yar_x
+        clc
+        adc #PLY_COL_R_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_MID_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_next5
+        sec
+        rts
+pow_next5:
+
+        ; BL
+        lda yar_x
+        clc
+        adc #PLY_COL_L_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_BOT_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_next6
+        sec
+        rts
+pow_next6:
+
+        ; BM
+        lda yar_x
+        clc
+        adc #PLY_COL_MID_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_BOT_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_next7
+        sec
+        rts
+pow_next7:
+
+        ; BR
+        lda yar_x
+        clc
+        adc #PLY_COL_R_XOFF
+        sta tmp1_lo
+        lda yar_x_hi
+        adc #0
+        sta tmp1_hi
+        lda yar_y
+        clc
+        adc #PLY_COL_BOT_YOFF
+        sta tmp2_lo
+        jsr wall_at_point
+        bcc pow_clear
+        sec
+        rts
+
+pow_clear:
+        clc
+        rts
+
+; ------------------------------------------------------------
+; wall_at_point
+;   Input:
+;     tmp1_lo/tmp1_hi = X pixel (16-bit)
+;     tmp2_lo         = Y pixel
+;   Output:
+;     C=1 if wall char (10..13), else C=0
+;   Leaves:
+;     X = row, tmp1_lo = col (0..39)
+; ------------------------------------------------------------
+wall_at_point:
+        ; ---- convert Y pixel -> row ----
+        lda tmp2_lo
+        sec
+        sbc #TEXT_Y0
+        bcc wap_not
+        lsr
+        lsr
+        lsr
+        tax
+        cpx #25
+        bcs wap_not
+
+        ; ---- convert X pixel -> col ----
+        sec
+        lda tmp1_lo
+        sbc #TEXT_X0
+        sta tmp1_lo
+        lda tmp1_hi
+        sbc #0
+        sta tmp1_hi
+        bmi wap_not
+
+        ldy #3
+wap_div8:
+        lsr tmp1_hi
+        ror tmp1_lo
+        dey
+        bne wap_div8
+
+        ; IMPORTANT: row_to_ptr clobbers Y, so do it BEFORE loading Y
+        txa
+        jsr row_to_ptr          ; sets dst_lo/dst_hi to start of row
+
+        ldy tmp1_lo             ; column
+        cpy #40
+        bcs wap_not
+
+        lda (dst_lo),y
+
+        cmp #CH_WALL_SOLID
+        bcc wap_not
+        cmp #CH_WALL_DMG3+1
+        bcs wap_not
+
+        sec
+        rts
+wap_not:
+        clc
+        rts
 
 ; ------------------------------------------------------------
 ; Joystick movement + sprite0 direction swap (RIGHT/UP/DOWN/LEFT)
-; Keeps facing direction when centered
+; HARD BLOCK: cannot overlap barrier/wall chars 10..13
 ; ------------------------------------------------------------
 read_joy_move_yar:
         lda JOY2
         sta joy_state
+
+        ; save old position (for collision revert)
+        lda yar_x
+        sta old_yar_x
+        lda yar_x_hi
+        sta old_yar_x_hi
+        lda yar_y
+        sta old_yar_y
 
 ; left (bit2 low)
         lda joy_state
@@ -1079,20 +1307,6 @@ read_joy_move_yar:
         bcs +
         dec yar_x_hi
 +
-        lda yar_x_hi
-        bpl +
-        lda #PLAYER_MIN_X_HI
-        sta yar_x_hi
-        lda #PLAYER_MIN_X_LO
-        sta yar_x
-+
-        lda yar_x_hi
-        bne no_left
-        lda yar_x
-        cmp #PLAYER_MIN_X_LO
-        bcs no_left
-        lda #PLAYER_MIN_X_LO
-        sta yar_x
 no_left:
 
 ; right (bit3 low)
@@ -1107,18 +1321,6 @@ no_left:
         bcc +
         inc yar_x_hi
 +
-        lda yar_x_hi
-        cmp #PLAYER_MAX_X_HI
-        bcc no_right
-        bne clamp_max
-        lda yar_x
-        cmp #PLAYER_MAX_X_LO
-        bcc no_right
-clamp_max:
-        lda #PLAYER_MAX_X_HI
-        sta yar_x_hi
-        lda #PLAYER_MAX_X_LO
-        sta yar_x
 no_right:
 
 ; up (bit0 low)
@@ -1141,6 +1343,49 @@ no_up:
         sta yar_y
 no_down:
 
+        ; clamp X min
+        lda yar_x_hi
+        bpl +
+        lda #PLAYER_MIN_X_HI
+        sta yar_x_hi
+        lda #PLAYER_MIN_X_LO
+        sta yar_x
++
+        lda yar_x_hi
+        bne +
+        lda yar_x
+        cmp #PLAYER_MIN_X_LO
+        bcs +
+        lda #PLAYER_MIN_X_LO
+        sta yar_x
++
+
+        ; clamp X max
+        lda yar_x_hi
+        cmp #PLAYER_MAX_X_HI
+        bcc +
+        bne clamp_max
+        lda yar_x
+        cmp #PLAYER_MAX_X_LO
+        bcc +
+clamp_max:
+        lda #PLAYER_MAX_X_HI
+        sta yar_x_hi
+        lda #PLAYER_MAX_X_LO
+        sta yar_x
++
+
+        ; ---- HARD collision check AFTER movement ----
+        jsr player_overlap_wall
+        bcc +                       ; ok, not overlapping
+        lda old_yar_x
+        sta yar_x
+        lda old_yar_x_hi
+        sta yar_x_hi
+        lda old_yar_y
+        sta yar_y
++
+
 ; --- keep parked left-missile glued to player Y ---
         lda pmiss_unlocked
         beq +
@@ -1149,7 +1394,6 @@ no_down:
         lda yar_y
         sta pmiss_y
 +
-
 
 ; ---- sprite0 direction frame selection ----
 ; If joystick centered (bits 0..3 all 1), keep last facing.
@@ -1310,6 +1554,142 @@ write_positions:
 +
         sta $d010
         rts
+
+; ------------------------------------------------------------
+; Bullet vs Barrier (sprite->screen mapping fixed with TEXT_X0/Y0)
+; ------------------------------------------------------------
+check_bullet_barrier_hit:
+        lda bullet_state
+        bne +
+        jmp cbb_done
++
+
+        lda #BULLET_HIT_X_OFF
+        sta hit_x_off
+        lda #BULLET_HIT_Y_OFF
+        sta hit_y_off
+
+        lda bullet_dir
+        cmp #DIR_RIGHT
+        bne +
+        lda #18
+        sta hit_x_off
+        jmp cbb_calc
++
+        cmp #DIR_LEFT
+        bne +
+        lda #6
+        sta hit_x_off
+        jmp cbb_calc
++
+        cmp #DIR_UP
+        bne +
+        lda #6
+        sta hit_y_off
+        jmp cbb_calc
++
+        lda #14
+        sta hit_y_off
+
+cbb_calc:
+        lda bullet_y
+        clc
+        adc hit_y_off
+        sec
+        sbc #TEXT_Y0
+        bcs +
+        jmp cbb_done
++
+        lsr
+        lsr
+        lsr
+        tax
+
+        cpx #BARRIER_ROW
+        bcs +
+        jmp cbb_done
++
+        cpx #(BARRIER_ROW + BARRIER_H)
+        bcc +
+        jmp cbb_done
++
+
+        lda bullet_x
+        clc
+        adc hit_x_off
+        sta tmp1_lo
+        lda bullet_x_hi
+        adc #0
+        sta tmp1_hi
+
+        sec
+        lda tmp1_lo
+        sbc #TEXT_X0
+        sta tmp1_lo
+        lda tmp1_hi
+        sbc #0
+        sta tmp1_hi
+        bpl +
+        jmp cbb_done
++
+
+        ldy #3
+cbb_div8:
+        lsr tmp1_hi
+        ror tmp1_lo
+        dey
+        bne cbb_div8
+
+        lda tmp1_lo
+        sta tmp2_lo
+
+        lda tmp2_lo
+        cmp #BARRIER_COL
+        bcs +
+        jmp cbb_done
++
+        cmp #(BARRIER_COL + BARRIER_W)
+        bcc +
+        jmp cbb_done
++
+
+        txa
+        jsr row_to_ptr
+        ldy tmp2_lo
+        lda (dst_lo),y
+
+        cmp #CH_WALL_SOLID
+        bcs +
+        jmp cbb_done
++
+        cmp #CH_WALL_DMG3+1
+        bcc +
+        jmp cbb_done
++
+
+        lda #CH_SPACE
+        sta (dst_lo),y
+
+        txa
+        jsr row_to_color_ptr
+        ldy tmp2_lo
+        lda #0
+        sta (dst_lo),y
+
+        lda #0
+        sta bullet_state
+        lda #BULLET_OFF_X
+        sta bullet_x
+        lda #0
+        sta bullet_x_hi
+        lda #BULLET_OFF_Y
+        sta bullet_y
+
+cbb_done:
+        rts
+
+hit_x_off: .byte 0
+hit_y_off: .byte 0
 
 ; ------------------------------------------------------------
 ; Collision: sprite0 (player) vs sprite1 (enemy)
@@ -1627,7 +2007,7 @@ rtcp_done:
 ; ------------------------------------------------------------
 ; State / temps (regular RAM)
 ; ------------------------------------------------------------
-game_mode:       .byte 0    ; 0=playing, 1=exploding
+game_mode:       .byte 0
 explode_radius:  .byte 0
 explode_wait:    .byte 0
 
@@ -1675,39 +2055,30 @@ shot_x_hi:  .byte 0
 zone_blank:  .byte 0
 zone_rowtmp: .byte 0
 
-; --- player facing direction ---
 player_dir:      .byte DIR_RIGHT
 
-; --- bullet (sprite3) ---
-bullet_state:    .byte 0        ; 0=inactive, 1=flying
+bullet_state:    .byte 0
 bullet_dir:      .byte 0
 bullet_x:        .byte 0
 bullet_x_hi:     .byte 0
 bullet_y:        .byte 0
 
-; --- player missile on left (sprite4) ---
-pmiss_unlocked:  .byte 0        ; 0=hidden/locked, 1=visible/unlocked
-pmiss_state:     .byte 0        ; 0=parked/ready, 1=flying
+pmiss_unlocked:  .byte 0
+pmiss_state:     .byte 0
 pmiss_x:         .byte 0
 pmiss_x_hi:      .byte 0
 pmiss_y:         .byte 0
 
+old_yar_x:     .byte 0
+old_yar_x_hi:  .byte 0
+old_yar_y:     .byte 0
+
 ; ------------------------------------------------------------
 ; sprite_data: 512 bytes copied to $3000
-; Layout:
-;   $3000 sprite0 RIGHT
-;   $3040 sprite0 UP
-;   $3080 sprite0 DOWN
-;   $30C0 sprite0 LEFT
-;   $3100 sprite1 alien
-;   $3140 sprite2 SMALL enemy missile
-;   $3180 sprite3 LARGE missile/shot
-;   $31C0 sprite4 NEW player bullet
 ; ------------------------------------------------------------
 sprite_data:
 
 ; sprite0 RIGHT
-sprite_0_right:
         .byte $00,$00,$00,$02,$00,$00,$02,$00
         .byte $00,$02,$00,$00,$02,$a0,$00,$02
         .byte $a0,$20,$08,$28,$20,$08,$28,$20
@@ -1718,7 +2089,6 @@ sprite_0_right:
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
 ; sprite0 UP
-sprite_0_up:
         .byte $00,$00,$00,$00,$00,$00,$00,$82
         .byte $00,$00,$82,$00,$00,$28,$00,$00
         .byte $28,$00,$00,$28,$00,$00,$28,$00
@@ -1729,7 +2099,6 @@ sprite_0_up:
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
 ; sprite0 DOWN
-sprite_0_down:
         .byte $00,$00,$00,$00,$00,$00,$00,$aa
         .byte $00,$00,$aa,$00,$0a,$28,$a0,$0a
         .byte $28,$a0,$02,$28,$80,$02,$00,$80
@@ -1740,7 +2109,6 @@ sprite_0_down:
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
 ; sprite0 LEFT
-sprite_0_left:
         .byte $00,$00,$00,$00,$00,$80,$00,$00
         .byte $80,$00,$00,$80,$00,$0a,$80,$08
         .byte $0a,$80,$08,$28,$20,$08,$28,$20
@@ -1780,24 +2148,16 @@ sprite_0_left:
         .byte $00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$83
 
-; sprite4 NEW player bullet (small diamond/dot)
-; 21 rows * 3 bytes = 63 bytes, then final byte ($83)
-        ; rows 0..7 empty
+; sprite4 NEW player bullet
         .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00,  $00,$00,$00
         .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00,  $00,$00,$00
-
-        ; rows 8..14 diamond
-        .byte $00,$0c,$00   ; 1 pixel
-        .byte $00,$3c,$00   ; 2 pixels
-        .byte $00,$fc,$00   ; 3 pixels
-        .byte $00,$ff,$00   ; 4 pixels (small block)
-        .byte $00,$fc,$00
-        .byte $00,$3c,$00
-        .byte $00,$0c,$00
-
-        ; rows 15..20 empty
+        .byte $00,$00,$00
+        .byte $00,$00,$00
+        .byte $00,$18,$00
+        .byte $00,$18,$00
+        .byte $00,$00,$00
+        .byte $00,$00,$00
+        .byte $00,$00,$00
         .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00
         .byte $00,$00,$00,  $00,$00,$00,  $00,$00,$00
-
-        ; 64th byte
         .byte $83
