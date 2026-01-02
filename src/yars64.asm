@@ -470,6 +470,7 @@ sound_update:
         sta buzz_on
         sta pew_timer
         sta expl_timer
+        sta pmiss_snd_timer
         rts
 
 su_explode:
@@ -483,14 +484,14 @@ su_explode:
         lda #0
         sta buzz_on
         sta pew_timer
+        sta pmiss_snd_timer
         rts
 
 
 su_play:
-        ; if explosion still active (shouldn't happen much), finish it here
         jsr explosion_sound_update
 
-        ; --- ensure hum is ON (in case anything else killed it) ---
+        ; keep hum alive
         lda V3_CTRL
         and #GATE
         bne hum_ok
@@ -498,7 +499,12 @@ su_play:
         sta V3_CTRL
 hum_ok:
 
-        ; desired buzz window: (frame_counter & $0f) < BUZZ_LEN
+        ; ---- run rocket sound on V2 (and suppress buzz while active) ----
+        jsr pmiss_sound_update
+        lda pmiss_snd_timer
+        bne su_done            ; <-- NEW: if rocket playing, don't run buzz logic
+
+        ; ---- existing buzz logic below stays as-is ----
         lda frame_counter
         and #$0f
         cmp #BUZZ_LEN
@@ -511,7 +517,7 @@ want_no_buzz:
         sta V2_CTRL          ; gate off
         lda #0
         sta buzz_on
-        rts
+        jmp su_done
 
 want_buzz:
         lda buzz_on
@@ -541,7 +547,7 @@ want_buzz:
 
         lda #1
         sta buzz_on
-        rts
+        jmp su_done
 
 buzz_live:
         ; tiny wobble so it feels “electrical” without being high
@@ -551,15 +557,15 @@ buzz_live:
 buzz_b:
         lda #$0d
         sta V2_FREQ_HI
-        rts
+        jmp su_done
 buzz_a:
         lda #$0b
         sta V2_FREQ_HI
-        rts
+        jmp su_done
 
 su_done:
 
-                ; ---- PEW update (Voice 1) ----
+        ; ---- PEW update (Voice 1) ----
         lda pew_timer
         beq pew_done
 
@@ -585,6 +591,9 @@ pew_done:
 
 
 pew_start:
+        lda expl_timer
+        bne +       ; explosion active -> don’t start other V1 sounds
+
         ; restart the pew every time you fire
         lda #PEW_LEN
         sta pew_timer
@@ -609,57 +618,34 @@ pew_start:
 
         lda #(PULSE|GATE)
         sta V1_CTRL
++
         rts
 
 explosion_sound_start:
-        lda #EXP_SND_LEN
+
+        lda #120               ; ~2 seconds at 60Hz
         sta expl_timer
 
-        ; --- save SID global regs we will touch ---
-        lda SID_MODEVOL
-        sta sid_mode_save
-        lda SID_RESFLT
-        sta sid_resflt_save
-        lda SID_FC_LO
-        sta sid_fc_lo_save
-        lda SID_FC_HI
-        sta sid_fc_hi_save
-
-        ; --- set volume max + LOWPASS filter on ---
-        ; keep only top nibble bits (filter flags) + volume
-        ; we'll force lowpass on during boom
-        lda sid_mode_save
-        and #$80            ; keep bit7 as-is (some setups use it)
-        ora #$10            ; lowpass enable
-        ora #$0f            ; volume = 15
+        lda #$0f               ; volume max (no filter bits)
         sta SID_MODEVOL
 
-        ; --- route VOICE 1 into filter, strong resonance ---
-        lda #$f1            ; resonance=15 (high nibble), filter V1 (bit0)
-        sta SID_RESFLT
-
-        ; --- start cutoff high (bright), we'll sweep down ---
-        lda #$07
+        lda #0
+        sta SID_RESFLT         ; no filter routing
         sta SID_FC_LO
         lda #$ff
         sta SID_FC_HI
 
-        ; --- Voice 1: NOISE boom, but NOT a gunshot ---
         lda #0
-        sta V1_CTRL
+        sta V1_CTRL            ; reset voice 1
 
-        ; Loud/long envelope:
-        ; AD: A=0 (instant), D=F (slow decay)
-        lda #$0f
+        lda #$0f               ; A=0, D=F (slow decay)
         sta V1_AD
-        ; SR: S=F (stay loud), R=8 (nice tail)
-        lda #$f8
+        lda #$f8               ; S=F, R=8 (tail)
         sta V1_SR
 
-        ; low-ish noise rate (rumble)
         lda #$00
         sta V1_FREQ_LO
-        lda #$08
+        lda #$40               ; IMPORTANT: higher noise clock => audible
         sta V1_FREQ_HI
 
         lda #(NOISE|GATE)
@@ -671,59 +657,21 @@ explosion_sound_update:
         lda expl_timer
         beq esu_done
 
-        ; elapsed = EXP_SND_LEN - expl_timer
-        lda #EXP_SND_LEN
-        sec
-        sbc expl_timer
-        sta exp_elapsed
-
-        ; exp_mul = elapsed * 6
-        lda exp_elapsed
-        asl                     ; *2
-        clc
-        adc exp_elapsed         ; *3
-        asl                     ; *6
-        sta exp_mul
-
-        ; cutoff_hi = $ff - exp_mul  (clamped)
-        lda #$ff
-        sec
-        sbc exp_mul
-        cmp #$18
-        bcs +
-        lda #$18
-+
-        sta SID_FC_HI
-        lda #$07
-        sta SID_FC_LO
-
-        ; tiny wobble in noise rate so it feels alive
-        lda exp_elapsed
-        and #$03
-        clc
-        adc #$06
+        ; optional falling noise-rate for “boom”
+        lda expl_timer
+        lsr
+        lsr
+        ora #$10               ; don’t let it go too low
         sta V1_FREQ_HI
-        lda #$00
-        sta V1_FREQ_LO
 
         dec expl_timer
         bne esu_done
 
-        ; timer hit 0 -> gate off + restore everything
         lda #0
         sta V1_CTRL
-
-        lda sid_resflt_save
-        sta SID_RESFLT
-        lda sid_fc_lo_save
-        sta SID_FC_LO
-        lda sid_fc_hi_save
-        sta SID_FC_HI
-        lda sid_mode_save
-        sta SID_MODEVOL
-
 esu_done:
         rts
+
 
 explosion_sound_stop:
         lda #0
@@ -742,6 +690,79 @@ explosion_sound_stop:
         sta SID_MODEVOL
         rts
 
+pmiss_sound_start:
+    lda expl_timer
+    bne +                   ; explosion active -> don’t start
+
+    lda #PMISS_SND_LEN
+    sta pmiss_snd_timer
+
+    ; While rocket is playing, kill buzz on Voice 2
+    lda #0
+    sta V2_CTRL
+    sta buzz_on
+
+    ; Voice 2: pulse “rocket”
+    lda #0
+    sta V2_CTRL
+
+    ; ~50% duty pulse
+    lda #$00
+    sta V2_PW_LO
+    lda #$08
+    sta V2_PW_HI
+
+    ; ADSR: fast attack, max sustain, moderate release
+    lda #$02        ; A=0, D=2
+    sta V2_AD
+    lda #$F6        ; S=15, R=6
+    sta V2_SR
+
+    ; base pitch ~370Hz  (word $17B6)
+    lda #$B6
+    sta V2_FREQ_LO
+    lda #$17
+    sta V2_FREQ_HI
+
+    lda #(PULSE|GATE)
+    sta V2_CTRL
++
+    rts
+
+
+pmiss_sound_update:
+    lda pmiss_snd_timer
+    beq psu_done
+
+    ; tiny vibrato (4-step)
+    lda frame_counter
+    and #3
+    tax
+    lda pmiss_vib_lo, x
+    sta V2_FREQ_LO
+    lda pmiss_vib_hi, x
+    sta V2_FREQ_HI
+
+    dec pmiss_snd_timer
+    bne psu_done
+
+    ; finished -> gate off voice 2
+    lda #0
+    sta V2_CTRL
+    lda #0
+    sta buzz_on
+
+psu_done:
+    rts
+
+
+pmiss_sound_stop:
+    lda #0
+    sta pmiss_snd_timer
+    lda #0
+    sta V2_CTRL
+    sta buzz_on
+    rts
 
 
 
@@ -918,6 +939,7 @@ sound_init:
         sta V1_CTRL
         lda #0
         sta pew_timer
+        sta pmiss_snd_timer
 
 
         ; ---- Voice 3: constant HUM (triangle) ----
@@ -1386,11 +1408,30 @@ do_game:
 after_update:
         jsr sound_update
 
+                ; --------------------------------------------------------
+        ; IRQ scheduling:
+        ; - In GAME_PLAY: keep the 3-stage raster scheme (zone on/off)
+        ; - In other modes (EXPLODE/SPIN/TITLE): single IRQ per frame
+        ;   to prevent IRQ "pileups" that speed up expl_timer.
+        ; --------------------------------------------------------
+        lda game_mode
+        cmp #GAME_PLAY
+        beq schedule_zone_irqs
+
+        ; single IRQ per frame at raster 0
+        lda #0
+        sta irq_state
+        lda #RASTER_FRAME
+        sta $d012
+        jmp irq_exit
+
+schedule_zone_irqs:
         lda #1
         sta irq_state
         lda #RASTER_ZONE_ON
         sta $d012
         jmp irq_exit
+
 
 irq_zone_on:
         inc frame_counter
@@ -1654,6 +1695,11 @@ upf_fire_pmiss:
         lda yar_y
         sta pmiss_y
 
+        jsr pmiss_sound_start
+
+        jmp upf_no_new_press
+
+
 upf_no_new_press:
 upf_prev_pressed:
         txa
@@ -1760,6 +1806,8 @@ pmiss_reset:
 
         ; disable / re-lock the player missile so we go back to bullets
         sta pmiss_unlocked
+
+        jsr pmiss_sound_stop
 
         lda #PMISS_START_X_LO
         sta pmiss_x
@@ -2885,7 +2933,7 @@ cpeh_hit:
         sta pmiss_state
         sta pmiss_unlocked
 
-        jsr explosion_sound_start
+        jsr pmiss_sound_stop    
         jsr player_lose
         rts
 
@@ -2965,6 +3013,8 @@ cph_div8:
         lda #0
         sta pmiss_state
         sta pmiss_unlocked
+
+        jsr pmiss_sound_stop
 
         lda #PMISS_START_X_LO
         sta pmiss_x
@@ -3142,12 +3192,20 @@ cpmc_done:
 
 ; ------------------------------------------------------------
 player_lose:
-        lda #1
+        lda #GAME_EXPLODE
         sta game_mode
+
         lda #0
         sta explode_radius
         sta explode_wait
+
+        ; start boom if it's not already running
+        lda expl_timer
+        bne +
+        jsr explosion_sound_start
++
         rts
+
 
 ; ------------------------------------------------------------
 ; enemy_set_delay
@@ -3713,6 +3771,17 @@ sid_fc_hi_save:  .byte 0
 exp_elapsed: .byte 0
 exp_mul:     .byte 0
 
+pmiss_snd_timer: .byte 0     ; >0 while left-missile fire sound active
+
+; Left-missile fire sound length (~1.05s @ 60Hz)
+PMISS_SND_LEN = 64
+
+; Base pitch from WAV ≈ 370 Hz (NTSC):
+; SID word ≈ $17B6  (lo=$B6 hi=$17)
+pmiss_vib_lo:
+    .byte $B0, $B6, $BC, $B6
+pmiss_vib_hi:
+    .byte $17, $17, $17, $17
 
 
 ; ------------------------------------------------------------
