@@ -149,6 +149,8 @@ COLLIDE_PMISS_Y_THR  = 8
 ENEMY_DASH_SPEED_X  = 6
 ENEMY_DASH_SPEED_Y  = 3
 
+LIVES_START = 3
+
 
 ; ---- Directions ----
 DIR_RIGHT = 0
@@ -378,13 +380,16 @@ tp_store:
         rts
 
 title_start_game:
+
+        ; reset lives for a fresh game
+        lda #LIVES_START
+        sta player_lives
+
         ; switch back to your game charset at $2800 ($d018=$1a)
         lda #$1a
         sta $d018
 
-        jsr restart_level       ; resets vars, draws playfield, inits sprites
-
-        ; restart_level already sets game_mode to play via reset_level_vars
+        jsr restart_level
         rts
 
 
@@ -450,6 +455,58 @@ pl_col_loop:
 
 pl_done:
         rts
+
+
+; ------------------------------------------------------------
+; Hard stop all sounds + sprites (for title screen)
+; ------------------------------------------------------------
+sound_all_stop:
+        lda #0
+        sta V1_CTRL
+        sta V2_CTRL
+        sta V3_CTRL
+
+        lda #0
+        sta pew_timer
+        sta buzz_on
+        sta pmiss_snd_timer
+        sta expl_timer
+
+        lda #0
+        sta SID_MODEVOL          ; volume OFF
+        rts
+
+
+go_title_from_game:
+        jsr sound_all_stop
+
+        lda #0
+        sta $d015               ; sprites OFF immediately
+
+        jsr draw_title_screen    ; sets GAME_TITLE, ROM charset, clears screen, etc.
+        rts
+
+
+; ------------------------------------------------------------
+; Called when a death animation finishes.
+; Decrements lives; if 0 => title screen, else restart level.
+; ------------------------------------------------------------
+life_lost_and_continue:
+        lda player_lives
+        beq ll_go_title          ; safety (shouldn’t happen, but avoids underflow)
+
+        dec player_lives
+        bne ll_restart
+
+ll_go_title:
+        jsr go_title_from_game
+        rts
+
+ll_restart:
+        jsr restart_level
+        rts
+
+
 
 BUZZ_LEN = 3        ; how long the bzzzt lasts (0..15). try 2..4
 
@@ -3442,7 +3499,7 @@ death_spin_update:
         rts
 
 dsu_restart:
-        jsr restart_level
+        jsr life_lost_and_continue
         rts
 
 dsu_spin:
@@ -3487,7 +3544,7 @@ explosion_update:
         beq eu_not_waiting
         dec explode_wait
         bne eu_done
-        jsr restart_level
+        jsr life_lost_and_continue
         rts
 
 eu_not_waiting:
@@ -3782,6 +3839,8 @@ pmiss_vib_lo:
     .byte $B0, $B6, $BC, $B6
 pmiss_vib_hi:
     .byte $17, $17, $17, $17
+
+player_lives:    .byte 0
 
 
 ; ------------------------------------------------------------
