@@ -454,14 +454,30 @@ pl_done:
 BUZZ_LEN = 3        ; how long the bzzzt lasts (0..15). try 2..4
 
 sound_update:
-        ; only during GAME_PLAY
         lda game_mode
         cmp #GAME_PLAY
         beq su_play
 
-        ; not playing: silence voices (gate off)
+        cmp #GAME_EXPLODE
+        beq su_explode
+
+        ; other modes (spin/title): silence everything
         lda #0
         sta V1_CTRL
+        sta V2_CTRL
+        sta V3_CTRL
+        lda #0
+        sta buzz_on
+        sta pew_timer
+        sta expl_timer
+        rts
+
+su_explode:
+        ; keep the boom alive during explosion frames
+        jsr explosion_sound_update
+
+        ; optional: keep hum/buzz off during boom
+        lda #0
         sta V2_CTRL
         sta V3_CTRL
         lda #0
@@ -471,6 +487,9 @@ sound_update:
 
 
 su_play:
+        ; if explosion still active (shouldn't happen much), finish it here
+        jsr explosion_sound_update
+
         ; --- ensure hum is ON (in case anything else killed it) ---
         lda V3_CTRL
         and #GATE
@@ -591,6 +610,139 @@ pew_start:
         lda #(PULSE|GATE)
         sta V1_CTRL
         rts
+
+explosion_sound_start:
+        lda #EXP_SND_LEN
+        sta expl_timer
+
+        ; --- save SID global regs we will touch ---
+        lda SID_MODEVOL
+        sta sid_mode_save
+        lda SID_RESFLT
+        sta sid_resflt_save
+        lda SID_FC_LO
+        sta sid_fc_lo_save
+        lda SID_FC_HI
+        sta sid_fc_hi_save
+
+        ; --- set volume max + LOWPASS filter on ---
+        ; keep only top nibble bits (filter flags) + volume
+        ; we'll force lowpass on during boom
+        lda sid_mode_save
+        and #$80            ; keep bit7 as-is (some setups use it)
+        ora #$10            ; lowpass enable
+        ora #$0f            ; volume = 15
+        sta SID_MODEVOL
+
+        ; --- route VOICE 1 into filter, strong resonance ---
+        lda #$f1            ; resonance=15 (high nibble), filter V1 (bit0)
+        sta SID_RESFLT
+
+        ; --- start cutoff high (bright), we'll sweep down ---
+        lda #$07
+        sta SID_FC_LO
+        lda #$ff
+        sta SID_FC_HI
+
+        ; --- Voice 1: NOISE boom, but NOT a gunshot ---
+        lda #0
+        sta V1_CTRL
+
+        ; Loud/long envelope:
+        ; AD: A=0 (instant), D=F (slow decay)
+        lda #$0f
+        sta V1_AD
+        ; SR: S=F (stay loud), R=8 (nice tail)
+        lda #$f8
+        sta V1_SR
+
+        ; low-ish noise rate (rumble)
+        lda #$00
+        sta V1_FREQ_LO
+        lda #$08
+        sta V1_FREQ_HI
+
+        lda #(NOISE|GATE)
+        sta V1_CTRL
+        rts
+
+
+explosion_sound_update:
+        lda expl_timer
+        beq esu_done
+
+        ; elapsed = EXP_SND_LEN - expl_timer
+        lda #EXP_SND_LEN
+        sec
+        sbc expl_timer
+        sta exp_elapsed
+
+        ; exp_mul = elapsed * 6
+        lda exp_elapsed
+        asl                     ; *2
+        clc
+        adc exp_elapsed         ; *3
+        asl                     ; *6
+        sta exp_mul
+
+        ; cutoff_hi = $ff - exp_mul  (clamped)
+        lda #$ff
+        sec
+        sbc exp_mul
+        cmp #$18
+        bcs +
+        lda #$18
++
+        sta SID_FC_HI
+        lda #$07
+        sta SID_FC_LO
+
+        ; tiny wobble in noise rate so it feels alive
+        lda exp_elapsed
+        and #$03
+        clc
+        adc #$06
+        sta V1_FREQ_HI
+        lda #$00
+        sta V1_FREQ_LO
+
+        dec expl_timer
+        bne esu_done
+
+        ; timer hit 0 -> gate off + restore everything
+        lda #0
+        sta V1_CTRL
+
+        lda sid_resflt_save
+        sta SID_RESFLT
+        lda sid_fc_lo_save
+        sta SID_FC_LO
+        lda sid_fc_hi_save
+        sta SID_FC_HI
+        lda sid_mode_save
+        sta SID_MODEVOL
+
+esu_done:
+        rts
+
+explosion_sound_stop:
+        lda #0
+        sta expl_timer
+        lda #0
+        sta V1_CTRL
+
+        ; reset filter too
+        lda #$00
+        sta SID_RESFLT
+        sta SID_FC_LO
+        lda #$ff
+        sta SID_FC_HI
+
+        lda #12
+        sta SID_MODEVOL
+        rts
+
+
 
 
 ; ------------------------------------------------------------
@@ -746,8 +898,20 @@ cs2:
         rts
 
 sound_init:
+
         lda #12
         sta SID_MODEVOL
+
+        ; --- RESET FILTER (so pew isn't muffled/silenced after explosion) ---
+        lda #$00
+        sta SID_RESFLT      ; $d417: no voices routed through filter, res=0
+        sta SID_FC_LO       ; $d415
+        lda #$ff
+        sta SID_FC_HI       ; $d416: wide open cutoff
+
+        lda SID_MODEVOL
+        sta sid_mode_save
+
 
         ; ---- Voice 1: PEW off initially ----
         lda #0
@@ -2717,13 +2881,14 @@ cpeh_y_lt:
         rts
 
 cpeh_hit:
-        ; kill the missile so it doesn't keep flying
         lda #0
         sta pmiss_state
         sta pmiss_unlocked
 
+        jsr explosion_sound_start
         jsr player_lose
         rts
+
 
 
 ; ------------------------------------------------------------
@@ -3307,8 +3472,13 @@ restart_level:
         jsr draw_zone_and_wall
         jsr draw_barrier
         jsr init_sprites
+
+        jsr explosion_sound_stop   ; make sure Voice1 & volume are sane
+        jsr sound_init             ; restart hum/buzz baseline every level
+
         cli
         rts
+
 
 ; ------------------------------------------------------------
 explosion_shimmer:
@@ -3523,10 +3693,26 @@ buzz_on: .byte 0    ; 0=off, 1=on
 
 pew_timer: .byte 0     ; counts down frames remaining in pew
 
+expl_timer: .byte 0       ; >0 while explosion sound active
+sid_mode_save: .byte 0    ; saves $d418 so we can restore volume/mode
+
+
 ; simple downward sweep (hi byte only). tweak values to taste.
 PEW_LEN = 6
 pew_freq_hi_tbl:
         .byte $28,$24,$20,$1c,$18,$14
+
+; boom lasts through full explosion: expand (0..MAX) + wait frames (+ a little tail)
+EXP_SND_LEN = (EXPLODE_MAX_RADIUS+1 + EXPLODE_WAIT_FRAMES + 30)
+
+
+sid_resflt_save: .byte 0
+sid_fc_lo_save:  .byte 0
+sid_fc_hi_save:  .byte 0
+
+exp_elapsed: .byte 0
+exp_mul:     .byte 0
+
 
 
 ; ------------------------------------------------------------
